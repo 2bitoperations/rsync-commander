@@ -1,0 +1,14 @@
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/
+
+# local-only host notes, credentials, env
+*.local.md
+*.local.*
+.env
+.env.*
+*.pem
+*.key
+id_*
+.claude/

@@ -1,0 +1,37 @@
+"""Run blocking endpoint calls off the UI thread, deliver results on it."""
+
+from concurrent.futures import ThreadPoolExecutor
+
+from PySide6.QtCore import QObject, Qt, Signal
+
+_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ui-io")
+
+
+class _Bridge(QObject):
+    done = Signal(object, object, object)  # callback, result, exception
+
+
+_bridge = None
+
+
+def _ensure():
+    global _bridge
+    if _bridge is None:
+        _bridge = _Bridge()
+        _bridge.done.connect(lambda cb, r, e: cb(r, e), Qt.QueuedConnection)
+    return _bridge
+
+
+def run_async(fn, callback):
+    """fn() runs in a worker thread; callback(result, exc) runs on the UI thread."""
+    b = _ensure()
+
+    def task():
+        try:
+            r = fn()
+        except Exception as ex:  # delivered to the callback
+            b.done.emit(callback, None, ex)
+        else:
+            b.done.emit(callback, r, None)
+
+    _pool.submit(task)
