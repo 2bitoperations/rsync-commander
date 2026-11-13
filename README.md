@@ -25,7 +25,12 @@ Download from [Releases](https://github.com/2bitoperations/rsync-commander/relea
   Applications. Builds are ad-hoc signed unless a Developer ID is configured, so the
   first launch needs right-click > Open.
 - **Linux** (x86_64 / aarch64): `rsync-commander-<ver>-linux-<arch>.AppImage`. Run
-  `chmod +x` on it and start it. There's also a `.tar.gz` of the same bundle.
+  `chmod +x` on it and start it. There's also a `.tar.gz` of the same bundle. Qt
+  sets the minimum glibc: 2.35 on x86_64 (Ubuntu 22.04, Debian 12) and 2.39 on
+  aarch64 (Ubuntu 24.04, Debian 13).
+- **Headless Linux**: `rsync-commander-cli-<ver>-linux-<arch>` (AppImage or tarball)
+  has the TUI, batch and copy without Qt. It's small and runs on glibc 2.35+ on both
+  arches, which includes Raspberry Pi OS bookworm.
 
 The one binary is the GUI with no arguments and the full CLI with arguments.
 `rsync-commander install-cli` symlinks it into `~/.local/bin`. From the macOS app run
