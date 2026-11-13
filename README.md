@@ -200,6 +200,23 @@ They go in batches of up to 64 files / 8 MiB:
 That's 3–4 round trips per batch instead of per file. 200 log-sized files to a NAS
 ~90 ms away took 5.7 s instead of 23.8 s, and a no-change re-run 3.8 s instead of 19.2 s.
 
+**NAS to NAS** (both panels remote):
+
+- **Same box**: the box copies the files itself (`copy_many`), as CoW reflinks on
+  btrfs, so even big frames are instant. Nothing crosses the network. Identical files
+  are skipped and the rest are written atomically, keeping mtime and mode.
+- **Different boxes**: the source box pushes blocks and small-file batches straight
+  to an agent it starts on the destination box (`push_block` / `push_many`). This
+  machine only coordinates: it still prepares, checksums and finalizes on the
+  destination, and every stream gets its own box-to-box connection. The source box
+  logs in to the destination with its own ssh key. Alternatively it can use **your**
+  agent with `--forward-agent` (or the checkbox in the copy dialog, or
+  `forward_agent = true` in a profile), but root on the source box could use that
+  agent during the copy, so only enable it for boxes you trust. If neither works,
+  or the destination is reached through a ProxyJump, the copy is relayed through this
+  machine and the job's notes say why.
+- `--no-direct` and `--no-server-side` force relaying.
+
 N worker threads each own one ssh connection per remote endpoint. That gives
 N independent TCP streams, which matters on high-latency links (see below).
 Dropped connections are retried with backoff on a fresh session, and work
@@ -239,8 +256,6 @@ Put per-host notes in `HOSTS.local.md`. It is gitignored.
   real network by up to ssh's buffer (a few MB); download progress is exact.
 - Diffing uses fixed-size blocks (no rolling hash). That suits FITS/RAW files,
   which get replaced or appended, not edited in the middle.
-- NAS→NAS copies are relayed through this machine. Server-side copy on the
-  same host, and direct box-to-box transfer, are not done yet.
 - No move (copy + delete source) or mirror (delete extraneous) mode yet.
 - Hosts without any Python would need an rsync/`scp -O` fallback engine (not written).
 - With Python 2.7 remotes, filenames that aren't valid UTF-8 are listed with

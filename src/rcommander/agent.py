@@ -39,7 +39,8 @@ import subprocess
 import sys
 import zlib
 
-AGENT_VERSION = 3
+AGENT_VERSION = 4
+PEER_LOST = -999   # errno meaning "box-to-box peer connection died: retry"
 HDR = struct.Struct(">II")
 PY2 = sys.version_info[0] == 2
 
@@ -221,6 +222,69 @@ def _entry(name, st):
         t = "o"
     return {"name": _text(name), "type": t, "size": st.st_size,
             "mtime_ns": _mtime_ns(st), "mode": _stat.S_IMODE(m)}
+
+
+PEERS = {}   # argv tuple -> Popen of a peer agent on another box (box-to-box)
+
+
+def _sha1_file(path):
+    h = hashlib.sha1()
+    f = open(path, "rb")
+    try:
+        while True:
+            c = f.read(1 << 22)
+            if not c:
+                break
+            h.update(c)
+    finally:
+        f.close()
+    return h.hexdigest()
+
+
+def _clone(src, dst):
+    """CoW clone where supported (btrfs: cp --reflink, APFS: cp -c), else copy."""
+    tmp = dst + ".cloning"
+    done = False
+    null = _devnull()
+    try:
+        if sys.platform.startswith("linux"):
+            done = subprocess.call(["cp", "--reflink=auto", "--", src, tmp],
+                                   stdout=null, stderr=null) == 0
+        elif sys.platform == "darwin":
+            done = subprocess.call(["cp", "-c", src, tmp], stdout=null, stderr=null) == 0
+    except EnvironmentError:
+        done = False
+    finally:
+        null.close()
+    if not done:
+        shutil.copyfile(src, tmp)
+    os.rename(tmp, dst)
+
+
+def _open_peer(argv):
+    """Start the agent on another box: run argv (an ssh command built by the
+    client) and stream it our own source, exactly as the client did for us."""
+    src = globals().get("__rc_source__")
+    if not src:
+        raise AgentError("box-to-box needs the agent source (old bootstrap)")
+    import tempfile
+    err = tempfile.TemporaryFile()
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+    try:
+        p.stdin.write(src)
+        p.stdin.flush()
+        hello, _ = read_frame(p.stdout)
+    except (EOFError, EnvironmentError, ValueError):
+        try:
+            p.kill()
+        except EnvironmentError:
+            pass
+        err.seek(0)
+        msg = err.read().decode("utf-8", "replace").strip()
+        raise AgentError("cannot reach peer: %s" % (msg.splitlines()[-1] if msg else "ssh failed"))
+    p.rc_python = hello.get("python", "?")
+    p.rc_codecs = hello.get("codecs") or {"zlib": 1}
+    return p
 
 
 class AgentError(Exception):
@@ -427,24 +491,139 @@ class Handler(object):
     def op_clone(self, req, payload):
         """Copy final -> partial, using a CoW clone where the FS supports it
         (btrfs on Synology, APFS on macOS) so it is instant."""
-        src, dst = req["src"], req["dst"]
-        tmp = dst + ".cloning"
-        done = False
-        null = _devnull()
-        try:
-            if sys.platform.startswith("linux"):
-                done = subprocess.call(["cp", "--reflink=auto", "--", src, tmp],
-                                       stdout=null, stderr=null) == 0
-            elif sys.platform == "darwin":
-                done = subprocess.call(["cp", "-c", src, tmp], stdout=null, stderr=null) == 0
-        except EnvironmentError:
-            done = False
-        finally:
-            null.close()
-        if not done:
-            shutil.copyfile(src, tmp)
-        os.rename(tmp, dst)
+        _clone(req["src"], req["dst"])
         return {}, b""
+
+    # -- same-host copies (both panels on one box): nothing crosses the network --
+    def op_copy_many(self, req, payload):
+        """[{src, dst, size, mtime_ns, mode}] -> per item "copied" | "same" | error.
+        Identical files (sha1, or size+mtime without checksum) are skipped and
+        only get their mtime fixed; others are CoW-cloned to .rcpart, then get
+        mtime/mode, then are renamed into place."""
+        checksum = req.get("checksum", True)
+        out = []
+        for it in req["items"]:
+            src, dst = it["src"], it["dst"]
+            size, mtime_ns = int(it["size"]), int(it["mtime_ns"])
+            try:
+                st = _stat_or_none(dst)
+                if st is not None and _stat.S_ISREG(st.st_mode) and st.st_size == size:
+                    if checksum:
+                        same = _sha1_file(src) == _sha1_file(dst)
+                    else:
+                        same = _mtime_ns(st) // 10 ** 9 == mtime_ns // 10 ** 9
+                    if same:
+                        if _mtime_ns(st) != mtime_ns:
+                            _set_mtime(dst, mtime_ns)
+                        out.append("same")
+                        continue
+                parent = os.path.dirname(dst)
+                if parent:
+                    _makedirs(parent)
+                part = partial_name(dst)
+                _clone(src, part)
+                _set_mtime(part, mtime_ns)
+                if it.get("mode") is not None:
+                    try:
+                        os.chmod(part, int(it["mode"]))
+                    except EnvironmentError:
+                        pass
+                os.rename(part, dst)
+                out.append("copied")
+            except EnvironmentError as ex:
+                out.append("error: " + _errmsg(ex))
+        return {"results": out}, b""
+
+    # -- box-to-box: this agent pushes straight to a peer agent on another box --
+    def _peer(self, argv):
+        key = tuple(argv)
+        p = PEERS.get(key)
+        if p is None or p.poll() is not None:
+            p = _open_peer(argv)
+            PEERS[key] = p
+        return p
+
+    def _peer_call(self, argv, req, data=b""):
+        p = self._peer(argv)
+        try:
+            write_frame(p.stdin, req, data)
+            resp, rdata = read_frame(p.stdout)
+        except (EOFError, EnvironmentError, ValueError) as ex:
+            PEERS.pop(tuple(argv), None)
+            raise AgentError("peer connection lost: %s" % ex, PEER_LOST)
+        if not resp.get("ok"):
+            raise AgentError("peer: %s" % resp.get("error"), resp.get("errno", 0))
+        return resp, rdata
+
+    def _peer_codec(self, argv, want):
+        codecs = getattr(self._peer(argv), "rc_codecs", {"zlib": 1})
+        if want and want in CODECS and want in codecs:
+            return want
+        if want and "zlib" in codecs:
+            return "zlib"
+        return None
+
+    def op_peer_open(self, req, payload):
+        p = self._peer(req["argv"])
+        return {"python": getattr(p, "rc_python", "?"),
+                "codecs": getattr(p, "rc_codecs", {})}, b""
+
+    def op_push_block(self, req, payload):
+        """Read a block here and write it to `dst_path` on the peer."""
+        argv = req["peer"]
+        f = open(req["path"], "rb")
+        try:
+            data = _read_at(f, int(req["offset"]), int(req["length"]))
+        finally:
+            f.close()
+        sha = hashlib.sha1(data).hexdigest()
+        wreq = {"op": "write", "path": req["dst_path"], "offset": int(req["offset"]),
+                "sha1": sha}
+        body = data
+        codec = self._peer_codec(argv, req.get("codec"))
+        if codec and data:
+            zd = compress(codec, int(req.get("level", 1)), data)
+            if len(zd) < len(data) * 0.92:
+                wreq["z"], body = codec, zd
+        self._peer_call(argv, wreq, body)
+        return {"sha1": sha, "rawlen": len(data), "wire": len(body)}, b""
+
+    def op_push_many(self, req, payload):
+        """Small-file batch straight to the peer: read here, put_many there."""
+        argv = req["peer"]
+        metas, parts, read_errors = [], [], []
+        for m in req["files"]:
+            try:
+                f = open(m["src"], "rb")
+                try:
+                    data = f.read()
+                finally:
+                    f.close()
+            except EnvironmentError as ex:
+                read_errors.append(_errmsg(ex))
+                continue
+            if len(data) != int(m["size"]):
+                read_errors.append("source changed size while reading")
+                continue
+            read_errors.append(None)
+            metas.append({"final": m["final"], "len": len(data),
+                          "sha1": hashlib.sha1(data).hexdigest(),
+                          "mtime_ns": m["mtime_ns"], "mode": m.get("mode")})
+            parts.append(data)
+        blob = b"".join(parts)
+        preq = {"op": "put_many", "files": metas, "touch": req.get("touch", [])}
+        codec = self._peer_codec(argv, req.get("codec"))
+        if codec and blob:
+            zd = compress(codec, int(req.get("level", 1)), blob)
+            if len(zd) < len(blob) * 0.92:
+                preq["z"], blob_out = codec, zd
+            else:
+                blob_out = blob
+        else:
+            blob_out = blob
+        resp, _ = self._peer_call(argv, preq, blob_out)
+        return {"read_errors": read_errors, "errors": resp["errors"],
+                "wire": len(blob_out)}, b""
 
     def op_write(self, req, payload):
         path, off = req["path"], int(req["offset"])

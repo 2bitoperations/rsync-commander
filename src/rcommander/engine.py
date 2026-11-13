@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .endpoint import ConnectionLost, RemoteError
+from .endpoint import ConnectionLost, RemoteError, peer_argv, same_box
 from .fmt import fmt_bytes as fmt_size
 
 # Block states (stored in a bytearray per file for cheap painting).
@@ -74,6 +74,12 @@ class Options:
     small_file_max: int = 1 << 20
     batch_files: int = 64
     batch_bytes: int = 8 << 20
+    # NAS-to-NAS: same box -> copy on the box itself; different boxes -> the
+    # source box pushes straight to the destination (needs its own ssh key for
+    # it, or forward_agent). Either falls back to relaying through this machine.
+    server_side: bool = True
+    direct: bool = True
+    forward_agent: bool = False
 
 
 class FileTask:
@@ -219,6 +225,8 @@ class Job:
         self.compression = "none"
         self.codec = None
         self.level = 1
+        self.mode = "relay"       # relay | server (same box) | direct (box to box)
+        self.peer = None          # direct: argv the source box runs to reach the peer
         self._samples = collections.deque(maxlen=64)   # (t, logical, wire)
         self._wsamples = collections.deque(maxlen=64)  # (t, [bytes per worker])
         self._whist = []                                # per worker: deque of rates
@@ -292,6 +300,8 @@ class Job:
             t.start()
         for t in threads:
             t.join()
+        if self.mode == "direct":
+            self.src_ep.forward_agent = False
         with self.lock:
             self.t_end = time.time()
             if self.cancelled:
@@ -309,6 +319,7 @@ class Job:
         s_dst = self.dst_ep.session()
         try:
             self._resolve_codec(s_src, s_dst)
+            self._choose_mode()
             dirs = []
             for src in self.sources:
                 sp = src.path.rstrip("/") or "/"
@@ -355,6 +366,39 @@ class Job:
             s_src.close()
             s_dst.close()
 
+    def _choose_mode(self):
+        src, dst = self.src_ep, self.dst_ep
+        if self.opts.server_side and same_box(src, dst):
+            self.mode = "server"
+            self.log.append(f"same box ({src.host}): copying on the box itself")
+            return
+        remote = lambda e: getattr(e, "is_local", True) is False   # noqa: E731
+        if not (self.opts.direct and remote(src) and remote(dst)):
+            return
+        argv, why = peer_argv(dst)
+        if argv is None:
+            self.log.append(f"box-to-box direct unavailable: {why}; relaying through here")
+            return
+        src.forward_agent = self.opts.forward_agent
+        probe = src.session()
+        try:
+            info = probe.peer_open(argv)
+            self.mode, self.peer = "direct", argv
+            self.log.append(f"direct box-to-box: {src.host} → {dst.host} "
+                            f"(peer python {info.get('python')}"
+                            f"{', agent forwarded' if self.opts.forward_agent else ''})")
+        except (RemoteError, ConnectionLost) as ex:
+            src.forward_agent = False
+            hint = ("" if self.opts.forward_agent else
+                    f"; if {src.host} has no ssh key for {dst.host}, enable agent forwarding")
+            self.log.append(f"box-to-box direct failed ({ex}): relaying through here{hint}")
+        finally:
+            probe.close()
+
+    @property
+    def codec_name(self):
+        return CODEC_OF.get(self.opts.compression)
+
     def _resolve_codec(self, s_src, s_dst):
         """Use the requested codec if every network leg can decode it; else
         fall back to gzip (zlib is in every Python's stdlib)."""
@@ -400,6 +444,11 @@ class Job:
         if self.batch_retry:
             self.batches_inflight += 1
             return self.batch_retry.popleft()
+        if self.mode == "server":
+            if self.next_idx < len(self.files):
+                return self._gather_batch(kind="server", max_bytes=1 << 30,
+                                          small_only=False)
+            return None
         for f in self.active:
             w = self._pick_in(f)
             if w is not None:
@@ -417,13 +466,14 @@ class Job:
             return Work("prepare", f)
         return None
 
-    def _gather_batch(self):
-        """Consecutive small files from the queue, up to the batch limits."""
+    def _gather_batch(self, kind="batch", max_bytes=None, small_only=True):
+        """Consecutive (small) files from the queue, up to the batch limits."""
         batch, total = [], 0
         now = time.time()
+        max_bytes = max_bytes or self.opts.batch_bytes
         while self.next_idx < len(self.files) and len(batch) < self.opts.batch_files:
             f = self.files[self.next_idx]
-            if not self._is_small(f) or (batch and total + f.size > self.opts.batch_bytes):
+            if (small_only and not self._is_small(f)) or (batch and total + f.size > max_bytes):
                 break
             self.next_idx += 1
             batch.append(f)
@@ -432,7 +482,7 @@ class Job:
             f.started_at = now
             f.bytes_needed = f.size            # assume it's sent until probed
         self.batches_inflight += 1
-        return Work("batch", batch[0], files=batch, count=total)
+        return Work(kind, batch[0], files=batch, count=total)
 
     def _pick_in(self, f):
         if f.state == F_QUEUED:  # prepare being retried after a lost connection
@@ -797,6 +847,23 @@ class Worker:
                 else:
                     send.append(f)
         src_local, dst_local = job.src_ep.is_local, job.dst_ep.is_local
+        if job.mode == "direct":
+            sent, failed = [], []
+            if send or touch:
+                job.batch_sending(send)
+                r = src.push_many(job.peer, [{"src": f.src_path, "final": f.dst_path,
+                                              "size": f.size, "mtime_ns": f.mtime_ns,
+                                              "mode": f.mode} for f in send],
+                                  job.codec_name, job.level, touch=touch)
+                errs = iter(r["errors"])
+                for f, rerr in zip(send, r["read_errors"]):
+                    e = rerr or next(errs)
+                    (failed.append((f, e)) if e else sent.append(f))
+                info.bytes += sum(f.size for f in sent)
+                job.done_batch(w, same, sent, failed, r["wire"], 1)
+            else:
+                job.done_batch(w, same, [], [], 0, 0)
+            return
 
         def prog(k):
             info.moved += k
@@ -829,6 +896,25 @@ class Worker:
         legs = (0 if src_local else 1) + (0 if dst_local else 1)
         job.done_batch(w, same, sent, failed, wire, legs)
 
+    def _do_server(self, w):
+        """Same box: the box copies its own files (CoW clone where possible)."""
+        job, info, files = self.job, self.info, w.files
+        info.block, info.total, info.moved, info.label = 0, w.count, 0, f"on-box copy of {len(files)}"
+        info.desc = f"copying {len(files)} file(s) on the box ({fmt_size(w.count)}) from {files[0].rel}"
+        job.batch_sending(files)
+        res = self._sess("dst").copy_many(
+            [{"src": f.src_path, "dst": f.dst_path, "size": f.size, "mtime_ns": f.mtime_ns,
+              "mode": f.mode} for f in files], job.opts.checksum)
+        same, sent, failed = [], [], []
+        for f, r in zip(files, res):
+            if r == "same":
+                same.append(f)
+            elif r == "copied":
+                sent.append(f)
+            else:
+                failed.append((f, r))
+        job.done_batch(w, same, sent, failed, 0, 0)
+
     def _do(self, w):
         job, info = self.job, self.info
         info.state, info.file_id, info.block, info.moved, info.total = "busy", w.f.id, -1, 0, 0
@@ -858,6 +944,15 @@ class Worker:
                 info.desc = f"{f.rel}  block {i + 1}/{f.nblocks}"
                 src_local = job.src_ep.is_local
                 dst_local = job.dst_ep.is_local
+                if job.mode == "direct":
+                    info.desc = f"{f.rel}  block {i + 1}/{f.nblocks}  (box to box)"
+                    r = self._sess("src").push_block(job.peer, f.src_path, i * f.bs, n,
+                                                     f.partial, job.codec_name, job.level)
+                    if r["rawlen"] != n:
+                        raise RemoteError(f"short read at block {i}: source changed?")
+                    info.bytes += n
+                    job.done_block(w, r["wire"], n)
+                    return
                 # Progress is counted once: on the remote leg of the transfer.
                 def prog(k):
                     info.moved += k
@@ -878,6 +973,8 @@ class Worker:
                 job.done_block(w, wire, n * legs)
             elif w.kind == "batch":
                 self._do_batch(w)
+            elif w.kind == "server":
+                self._do_server(w)
             elif w.kind == "finalize":
                 info.desc = f"finalize {f.rel}"
                 d = self._sess("dst")
@@ -889,7 +986,7 @@ class Worker:
         except ConnectionLost as ex:
             self._drop_sessions()
             w.tries += 1
-            batch = w.kind == "batch"
+            batch = w.kind in ("batch", "server")
             if job.cancelled:
                 (job.requeue_batch if batch else job.requeue)(w)
                 return
@@ -905,9 +1002,9 @@ class Worker:
             while time.time() < end and not job.cancelled:
                 time.sleep(0.2)
         except RemoteError as ex:
-            job.fail_batch(w, str(ex)) if w.kind == "batch" else job.failed(w, str(ex))
+            job.fail_batch(w, str(ex)) if w.files else job.failed(w, str(ex))
         except Exception as ex:  # bug or unexpected: fail the file(s), keep going
             msg = f"{type(ex).__name__}: {ex}"
-            job.fail_batch(w, msg) if w.kind == "batch" else job.failed(w, msg)
+            job.fail_batch(w, msg) if w.files else job.failed(w, msg)
         finally:
             info.state = "idle" if info.state == "busy" else info.state

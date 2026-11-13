@@ -37,7 +37,7 @@ AGENT_SRC = _agent_source()
 BOOTSTRAP = (
     "import sys;n=int(sys.argv[1]);"
     "s=getattr(sys.stdin,'buffer',sys.stdin).read(n);"
-    "exec(compile(s,'rcagent','exec'),{'__name__':'rcagent'})"
+    "exec(compile(s,'rcagent','exec'),{'__name__':'rcagent','__rc_source__':s})"
 )
 # python="auto": first interpreter found on the remote PATH, newest first.
 AUTO_PYTHONS = ("python3", "python", "python2")
@@ -64,6 +64,8 @@ class ConnectionLost(Exception):
 
 def _check(resp):
     if not resp.get("ok"):
+        if resp.get("errno") == _agent.PEER_LOST:   # box-to-box leg died: retryable
+            raise ConnectionLost(resp.get("error", "peer connection lost"))
         raise RemoteError(resp.get("error", "unknown error"), resp.get("errno", 0))
     return resp
 
@@ -187,6 +189,22 @@ class Session:
             progress = lambda k: inner(k * scale)  # noqa: E731
         resp = self.call(req, payload, progress=progress)[0]
         return resp["errors"], resp.get("touch_errors", []), (len(payload) if self.wire_compress else 0)
+
+    # -- same-host + box-to-box ------------------------------------------------
+    def copy_many(self, items, checksum=True):
+        return self.call({"op": "copy_many", "items": items, "checksum": checksum})[0]["results"]
+
+    def peer_open(self, argv):
+        return self.call({"op": "peer_open", "argv": argv})[0]
+
+    def push_block(self, peer, path, offset, length, dst_path, codec=None, level=1):
+        return self.call({"op": "push_block", "peer": peer, "path": path, "offset": offset,
+                          "length": length, "dst_path": dst_path, "codec": codec,
+                          "level": level})[0]
+
+    def push_many(self, peer, files, codec=None, level=1, touch=()):
+        return self.call({"op": "push_many", "peer": peer, "files": files, "codec": codec,
+                          "level": level, "touch": [list(t) for t in touch]})[0]
 
     def prepare(self, final):
         return self.call({"op": "prepare", "final": final})[0]
@@ -350,6 +368,7 @@ class RemoteEndpoint(Endpoint):
         self.ssh_opts = list(ssh_opts)
         self.control_path = None   # set to share an authenticated ssh master
         self.master = None         # sshauth.SshMaster owned by this endpoint
+        self.forward_agent = False # -A on new sessions (opt-in box-to-box auth)
         self._auth_lock = threading.Lock()
         self._authed = False
         self._browse = None
@@ -368,6 +387,7 @@ class RemoteEndpoint(Endpoint):
                 # already-authenticated master connection instead.
                 "-o", "ControlMaster=no",
                 "-o", f"ControlPath={self.control_path or 'none'}",
+                *(["-A"] if self.forward_agent else []),
                 *self.ssh_opts]
 
     def session(self):
@@ -412,6 +432,35 @@ class RemoteEndpoint(Endpoint):
             self.master.close()
             self.master = None
             self._authed = False
+
+
+def peer_argv(dst_ep):
+    """The ssh command a *source box* runs to start an agent on dst_ep's box.
+    ssh-config aliases only exist here, so resolve them (`ssh -G`) into an
+    explicit user/host/port. Returns (argv, None) or (None, reason)."""
+    try:
+        out = subprocess.run(["ssh", "-G", *dst_ep.ssh_opts, dst_ep.host], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        return None, f"ssh -G failed: {ex}"
+    cfg = {}
+    for line in out.splitlines():
+        k, _, v = line.partition(" ")
+        cfg.setdefault(k.lower(), v)
+    for k in ("proxyjump", "proxycommand"):
+        if cfg.get(k) and cfg[k] != "none":
+            return None, f"{dst_ep.host} is reached via {k}, which the source box can't reuse"
+    argv = ["ssh", "-T", "-x", "-e", "none", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+            "-p", cfg.get("port", "22"), "-l", cfg.get("user", ""),
+            cfg.get("hostname", dst_ep.host), remote_agent_command(dst_ep.python)]
+    return argv, None
+
+
+def same_box(a, b):
+    return (isinstance(a, RemoteEndpoint) and isinstance(b, RemoteEndpoint)
+            and (a is b or (a.host == b.host and a.ssh_opts == b.ssh_opts)))
 
 
 def browse_call(ep, fn):

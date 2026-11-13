@@ -24,8 +24,8 @@ class FakeRemote(RemoteEndpoint):
     """Runs the agent over pipes exactly as over ssh, minus ssh. Run under old
     interpreters to prove the agent stays compatible with the boxes we target."""
 
-    def __init__(self, python):
-        super().__init__("fake", python=python)
+    def __init__(self, python, host="fake"):
+        super().__init__(host, python=python)
 
     def agent_argv(self):
         return ["sh", "-c",

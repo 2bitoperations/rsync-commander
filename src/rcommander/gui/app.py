@@ -100,6 +100,14 @@ class CopyDialog(QDialog):
         form.addRow("Streams:", self.workers)
         form.addRow("Block size:", self.bs)
         form.addRow("Compression:", crow)
+        self.fwd = QCheckBox("box-to-box: forward my ssh agent to the source box")
+        self.fwd.setChecked(opts.forward_agent)
+        self.fwd.setToolTip(
+            "NAS-to-NAS copies go straight from one box to the other. The source box\n"
+            "needs to log in to the destination: with its own ssh key, or (if checked)\n"
+            "with your forwarded agent, which root on that box could use meanwhile.\n"
+            "If neither works the copy is relayed through this machine.")
+        form.addRow("", self.fwd)
         lay.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Copy")
@@ -111,7 +119,8 @@ class CopyDialog(QDialog):
         return engine.Options(block_size=self.bs.currentData(), workers=self.workers.value(),
                               checksum=self.checksum.isChecked(),
                               compression=self.compress.currentData(),
-                              level=self.level.value())
+                              level=self.level.value(),
+                              forward_agent=self.fwd.isChecked())
 
 
 class MainWindow(QMainWindow):

@@ -267,6 +267,8 @@ class CopyDialog(ModalScreen):
             yield Input(value=self.target, id="target")
             yield Checkbox("compare existing files block-by-block (SHA-1)", o.checksum,
                            id="checksum")
+            yield Checkbox("box-to-box: forward my ssh agent to the source box",
+                           o.forward_agent, id="fwd")
             with Horizontal(classes="row"):
                 yield Label("streams ")
                 yield Input(str(o.workers), id="workers", classes="num")
@@ -295,7 +297,8 @@ class CopyDialog(ModalScreen):
         o = engine.Options(
             workers=max(1, num("#workers", 4)), block_size=max(1, num("#bs", 4)) << 20,
             checksum=self.query_one("#checksum", Checkbox).value,
-            compression=self.query_one("#comp", Select).value, level=num("#level", 0))
+            compression=self.query_one("#comp", Select).value, level=num("#level", 0),
+            forward_agent=self.query_one("#fwd", Checkbox).value)
         self.dismiss((self.query_one("#target", Input).value.strip(), o))
 
     @on(Button.Pressed, "#cancel")

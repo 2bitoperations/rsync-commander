@@ -15,6 +15,9 @@ Profile reference (see examples/observatory.toml for a full one):
     checksum = true          # false: skip files whose size+mtime match
     compression = "zstd"     # zstd | gzip | none
     level = 0                # 0 = codec default
+    direct = true            # NAS-to-NAS: source box pushes straight to the dest
+    server_side = true       # same box: copy on the box itself
+    forward_agent = false    # let the source box use your ssh agent (opt-in)
 
     [[hook]]                 # shell commands, in order
     run = "dpkg-query -l > \"$RC_STAGE/reports/packages.txt\""
@@ -104,7 +107,8 @@ class Profile:
     def options(self):
         o = dict(self.data.get("options", {}))
         o.update(self.overrides)
-        known = {"workers", "block_size_mib", "checksum", "compression", "level"}
+        known = {"workers", "block_size_mib", "checksum", "compression", "level",
+                 "direct", "server_side", "forward_agent"}
         unknown = set(o) - known
         if unknown:
             raise ProfileError(f"unknown option(s): {', '.join(sorted(unknown))}")
@@ -114,7 +118,10 @@ class Profile:
         return engine.Options(workers=int(o.get("workers", 4)),
                               block_size=int(o.get("block_size_mib", 4)) << 20,
                               checksum=bool(o.get("checksum", True)),
-                              compression=comp, level=int(o.get("level", 0)))
+                              compression=comp, level=int(o.get("level", 0)),
+                              direct=bool(o.get("direct", True)),
+                              server_side=bool(o.get("server_side", True)),
+                              forward_agent=bool(o.get("forward_agent", False)))
 
     def dest(self):
         d = self.t(self.data["dest"])

@@ -41,7 +41,9 @@ def cmd_copy(a):
         sys.exit("all sources must be on the same endpoint")
     dst_ep, dst = parse_loc(a.dst, cache)
     opts = engine.Options(block_size=a.block_size << 20, workers=a.workers,
-                          checksum=not a.quick, compression=a.compress, level=a.level)
+                          checksum=not a.quick, compression=a.compress, level=a.level,
+                          direct=not a.no_direct, server_side=not a.no_server_side,
+                          forward_agent=a.forward_agent)
     from .sshauth import AuthError, ensure_auth
     masters = []
     try:
@@ -85,7 +87,7 @@ def _copy_run(a, srcs, dst_ep, dst, opts):
     print()
     s = job.snapshot()
     for n in s.notes:
-        print(f"note: {n}", file=sys.stderr)
+        print(f"note: {n}")
     for rel, err in s.errors:
         print(f"ERROR {rel}: {err}", file=sys.stderr)
     print(f"{engine.J_NAMES[s.state]} in {fmt_dur(s.elapsed)}: {s.files_done} copied, "
@@ -117,6 +119,13 @@ def main(argv=None):
     c.add_argument("-v", "--verbose", action="store_true")
     c.add_argument("--ssh-mux", choices=("auto", "always", "never"), default="auto",
                    help="auth once per host (see `batch --help`)")
+    c.add_argument("--no-direct", action="store_true",
+                   help="NAS-to-NAS: relay through this machine instead of box-to-box")
+    c.add_argument("--no-server-side", action="store_true",
+                   help="same box: relay through this machine instead of copying on the box")
+    c.add_argument("--forward-agent", action="store_true",
+                   help="box-to-box: forward your ssh agent to the source box so it can "
+                        "log in to the destination (root on that box could use it meanwhile)")
     c.add_argument("--python", default="auto",
                    help="remote interpreter (default: first of python3, python, python2)")
     pr = sub.add_parser("probe", help="show a host's python and codecs")
