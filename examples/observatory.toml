@@ -31,6 +31,10 @@ optional = true
 run = "PATH=$PATH:/usr/sbin:/sbin hwinfo > \"$RC_STAGE/reports/hwinfo_report.txt\" 2>/dev/null"
 optional = true
 
+# Directories never backed up, from any source (directory-only, case-insensitive):
+# pointing runs, closed-loop slews, hand-binned "bad" folders, PEC-training runs
+# and TheSkyX's thumbnail cache. Each source below starts with these rules.
+
 # -- images --------------------------------------------------------------------
 [[source]]
 path = [
@@ -43,7 +47,8 @@ path = [
 kind = "dir"
 to = "images/main_imager"
 follow_symlinks = true
-exclude = ["*@Focus*", "*Focus*", "*Closed Loop Slews*", "*Automated Pointing Run*", "*Guide*"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
+exclude = ["*@Focus*", "*Focus*", "*Guide*"]
 
 [[source]]
 path = [
@@ -58,7 +63,7 @@ to = "images/guider"
 follow_symlinks = true
 optional = true
 # keep guider darks, drop every other guider frame
-filter = ["+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
 
 # -- logs ----------------------------------------------------------------------
 [[source]]
@@ -66,18 +71,21 @@ path = ["~/Software Bisque/TheSkyX*/Logs", "~/Documents/Software Bisque/TheSkyX*
 kind = "dir"
 to = "logs/Logs"
 optional = true
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
 
 [[source]]
 path = ["~/Software Bisque/TheSkyX*/TPoint", "~/Documents/Software Bisque/TheSkyX*/TPoint"]
 kind = "dir"
 to = "logs/TPoint"
 optional = true
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
 
 [[source]]
 path = ["~/Software Bisque/TheSkyX*/Guider", "~/Documents/Software Bisque/TheSkyX*/Guider"]
 kind = "dir"
 to = "logs/Guider"
 optional = true
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
 
 # -- settings snapshot -----------------------------------------------------------
 [[archive]]
