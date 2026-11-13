@@ -89,3 +89,19 @@ def graph(values, width=40, height=3, kind="speed", vmax=None):
         if r < height - 1:
             t.append("\n")
     return t
+
+
+def stacked(segs, width=12):
+    """btop-style cells split into coloured segments, e.g. a file's identical /
+    sent / in-flight shares in the block-map colours. segs: [(fraction, colour)]."""
+    t = Text()
+    used = 0
+    for frac, color in segs:
+        n = int(round(max(0.0, frac) * width))
+        if frac > 0 and n == 0:
+            n = 1
+        n = min(n, width - used)
+        t.append("■" * n, style=color)
+        used += n
+    t.append("■" * (width - used), style=EMPTY)
+    return t

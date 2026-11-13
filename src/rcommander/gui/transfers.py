@@ -1,16 +1,16 @@
 """Transfer queue and the detailed live view of a job."""
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QApplication, QCheckBox, QGridLayout, QHBoxLayout,
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QProgressBar, QPushButton,
                                QScrollArea, QSplitter, QStyle, QStyledItemDelegate,
-                               QStyleOptionProgressBar, QTableView, QTreeWidget,
+                               QTableView, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView)
 
 from .. import engine
 from ..fmt import fmt_bytes, fmt_dur
-from .blockmap import BlockMap, legend_widget
+from .blockmap import COLORS, BlockMap, legend_widget
 
 
 class JobManager(QObject):
@@ -56,18 +56,50 @@ class JobManager(QObject):
                      (engine.J_DONE, engine.J_FAILED, engine.J_CANCELLED)]
 
 
+SEG_SAME = COLORS[engine.B_SAME]       # identical: verified, not sent
+SEG_DONE = COLORS[engine.B_DONE]       # sent + verified
+SEG_ACTIVE = COLORS[engine.B_ACTIVE]   # in flight
+TRACK = QColor("#3a3f47")
+
+
 class ProgressDelegate(QStyledItemDelegate):
+    """Draws a stacked bar ourselves. The native style's CE_ProgressBar ignores
+    the cell rect on macOS and paints a stray line at the top of the view.
+
+    Item data (Qt.UserRole): {"segs": [(fraction, QColor), ...], "text": str}.
+    The segments use the block-map colours, so a file's bar summarises its block map.
+    """
+
     def paint(self, painter, option, index):
         v = index.data(Qt.UserRole)
-        if v is None:
+        if not v:
             return super().paint(painter, option, index)
-        opt = QStyleOptionProgressBar()
-        opt.rect = option.rect.adjusted(2, 3, -2, -3)
-        opt.minimum, opt.maximum = 0, 1000
-        opt.progress = int(v * 1000)
-        opt.text = f"{v * 100:.1f}%"
-        opt.textVisible = True
-        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        r = QRectF(option.rect).adjusted(4, 4, -4, -4)
+        path = QPainterPath()
+        path.addRoundedRect(r, 4, 4)
+        painter.setClipPath(path)
+        painter.fillRect(r, TRACK)
+        x = r.left()
+        for frac, color in v["segs"]:
+            w = max(0.0, min(1.0, frac)) * r.width()
+            if w > 0:
+                painter.fillRect(QRectF(x, r.top(), w, r.height()), color)
+                x += w
+        painter.setClipping(False)
+        text = v.get("text")
+        if text:
+            f = painter.font()
+            f.setPointSizeF(max(8.0, f.pointSizeF() * 0.9))
+            painter.setFont(f)
+            painter.setPen(QColor(0, 0, 0, 160))
+            painter.drawText(r.translated(1, 1), Qt.AlignCenter, text)
+            painter.setPen(QColor("white"))
+            painter.drawText(r, Qt.AlignCenter, text)
+        painter.restore()
 
 
 class FilesModel(QAbstractTableModel):
@@ -110,6 +142,10 @@ class FilesModel(QAbstractTableModel):
     def headerData(self, s, o, role=Qt.DisplayRole):
         if o == Qt.Horizontal and role == Qt.DisplayRole:
             return self.COLS[s]
+        if o == Qt.Horizontal and role == Qt.ToolTipRole and s == 3:
+            return ("How much of the file is in place at the destination:\n"
+                    "dark green = identical (checksummed, not sent)\n"
+                    "green = sent and verified\norange = in flight")
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -132,7 +168,19 @@ class FilesModel(QAbstractTableModel):
                 b = f.blocks
                 return f"{b.count(engine.B_SAME) + b.count(engine.B_DONE)}/{f.nblocks}"
         elif role == Qt.UserRole and c == 3:
-            return f.progress
+            size = f.size or 1
+            moving = sum(f.block_progress.values())
+            pct = 100.0 if f.state in (engine.F_DONE, engine.F_SKIPPED) else min(
+                100.0, (f.bytes_same + f.bytes_done + moving) / size * 100)
+            return {"segs": [(f.bytes_same / size, SEG_SAME), (f.bytes_done / size, SEG_DONE),
+                             (moving / size, SEG_ACTIVE)],
+                    "text": f"{pct:.0f}%"}
+        elif role == Qt.ToolTipRole and c == 3:
+            moving = sum(f.block_progress.values())
+            return (f"identical (skipped): {fmt_bytes(f.bytes_same)}\n"
+                    f"sent: {fmt_bytes(f.bytes_done)}\n"
+                    f"in flight: {fmt_bytes(moving)}\n"
+                    f"of {fmt_bytes(f.size)}")
         elif role == Qt.ForegroundRole and c == 2 and f.state in self.STATE_COLORS:
             return QColor(self.STATE_COLORS[f.state])
         elif role == Qt.ToolTipRole and f.error:
@@ -200,9 +248,14 @@ class TransfersPane(QWidget):
         grid.setColumnStretch(3, 1)
 
         self.workers = QTreeWidget()
-        self.workers.setHeaderLabels(["Stream", "Activity", "Block"])
+        self.workers.setHeaderLabels(["Stream", "Activity", "Current block"])
+        self.workers.headerItem().setToolTip(
+            2, "How much of the block this stream is moving has crossed the network")
         self.workers.setRootIsDecorated(False)
         self.workers.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.workers.header().setStretchLastSection(False)
+        self.workers.header().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.workers.setColumnWidth(2, 260)
         self.workers.setItemDelegateForColumn(2, ProgressDelegate())
 
         self.files_model = FilesModel()
@@ -215,7 +268,7 @@ class TransfersPane(QWidget):
         self.files.verticalHeader().setDefaultSectionSize(20)
         self.files.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.files.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self.files.setColumnWidth(3, 120)
+        self.files.setColumnWidth(3, 150)
         self.files.clicked.connect(self._pick_file)
 
         self.follow = QCheckBox("follow active file")
@@ -245,7 +298,8 @@ class TransfersPane(QWidget):
         lower.addWidget(self.workers)
         lower.addWidget(self.files)
         lower.addWidget(mapbox)
-        lower.setSizes([90, 160, 120])
+        lower.setSizes([130, 160, 120])
+        self.workers.setMinimumHeight(110)   # header + 4 streams without scrolling
 
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -389,9 +443,16 @@ class TransfersPane(QWidget):
             it.setText(0, f"#{info.idx + 1}")
             it.setText(1, info.desc)
             if info.state == "busy" and info.block >= 0 and info.total:
-                it.setData(2, Qt.UserRole, min(1.0, info.moved / info.total))
+                f = self.cur_job.by_id.get(info.file_id) if self.cur_job else None
+                nb = f"/{f.nblocks}" if f else ""
+                it.setData(2, Qt.UserRole, {
+                    "segs": [(min(1.0, info.moved / info.total), SEG_ACTIVE)],
+                    "text": f"block {info.block + 1}{nb} · {fmt_bytes(info.moved)}"
+                            f" / {fmt_bytes(info.total)}"})
+                it.setText(2, "")
             else:
                 it.setData(2, Qt.UserRole, None)
+                it.setText(2, "")
             it.setForeground(1, QColor("#ef4444") if info.state == "reconnecting"
                              else QColor("#888") if info.state in ("idle", "stopped")
                              else QColor(self.palette().text().color()))

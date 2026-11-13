@@ -25,7 +25,7 @@ from textual.widgets import (Button, Checkbox, DataTable, Footer, Input, Label, 
 from . import engine
 from .endpoint import LocalEndpoint, RemoteEndpoint, browse_call, ssh_config_hosts
 from .fmt import fmt_bytes, fmt_dur
-from .tuistyle import graph, meter
+from .tuistyle import graph, meter, stacked
 
 LOCAL = "Local"
 
@@ -37,6 +37,17 @@ BLOCK_STYLE = {
 FILE_STYLE = {engine.F_DONE: "green3", engine.F_SKIPPED: "dark_sea_green4",
               engine.F_FAILED: "red1", engine.F_WORKING: "orange1",
               engine.F_PREPARING: "medium_purple1", engine.F_FINALIZING: "medium_purple1"}
+
+
+def file_meter(f):
+    """Identical / sent / in-flight shares of the file, in block-map colours."""
+    size = f.size or 1
+    moving = sum(f.block_progress.values())
+    t = stacked([(f.bytes_same / size, BLOCK_STYLE[engine.B_SAME]),
+                 (f.bytes_done / size, BLOCK_STYLE[engine.B_DONE]),
+                 (moving / size, BLOCK_STYLE[engine.B_ACTIVE])], 12)
+    pct = 100 if f.state in (engine.F_DONE, engine.F_SKIPPED) else f.progress * 100
+    return t.append(f" {pct:3.0f}%")
 
 
 def rate_history(job):
@@ -565,9 +576,10 @@ class TransfersScreen(Screen):
         ft = self.query_one("#files", DataTable)
         for f in j.files:
             key = str(f.id)
-            sig = (f.state, int(f.progress * 1000), f.bytes_same, f.bytes_done)
+            sig = (f.state, int(f.progress * 1000), f.bytes_same, f.bytes_done,
+                   int(sum(f.block_progress.values())) >> 16)
             cells = (Text(engine.F_NAMES[f.state], style=FILE_STYLE.get(f.state, "")),
-                     meter(f.progress, 12).append(f" {f.progress * 100:3.0f}%"),
+                     file_meter(f),
                      fmt_bytes(f.bytes_same), fmt_bytes(f.bytes_done))
             if key not in self._rows:
                 ft.add_row(f.rel, fmt_bytes(f.size), *cells, key=key)
