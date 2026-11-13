@@ -39,8 +39,14 @@ uv run rsync-commander install-app            # Dock/Spotlight launcher with nam
     unchecked, checksumming, identical, pending, transferring (filling up live),
     sent or failed. Hover a block to see its byte range.
 
-Requirements: ssh key auth (the app runs ssh with `BatchMode=yes`, so it can't
-answer password prompts) and **Python 2.7 or 3.x** on the remote. The app uses the
+**SSH auth.** The `copy` and `batch` commands authenticate at most once per host
+(`--ssh-mux auto`). If key auth works there are no prompts, and every stream gets its
+own TCP connection. If it doesn't, you're asked once (password or key passphrase)
+for a single master connection that all streams share. That works, but it is
+limited to one TCP stream's throughput, so `ssh-copy-id` is worth it on slow links.
+The GUI and TUI need working keys for now.
+
+Requirements: ssh access to the host and **Python 2.7 or 3.x** on the remote. The app uses the
 first of `python3`, `python`, `python2` on the remote PATH, or the one given with `--python`.
 
 ## Compression

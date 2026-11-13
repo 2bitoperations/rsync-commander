@@ -293,6 +293,7 @@ class RemoteEndpoint(Endpoint):
         self.name = host
         self.python = python
         self.ssh_opts = list(ssh_opts)
+        self.control_path = None   # set to share an authenticated ssh master
         self._browse = None
         self._browse_lock = threading.Lock()
         self._home = None
@@ -304,8 +305,11 @@ class RemoteEndpoint(Endpoint):
         return ["ssh", "-T", "-x", "-e", "none",
                 "-o", "BatchMode=yes",
                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
-                # one TCP stream per session: do not multiplex onto a master
-                "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                # Default: one TCP stream per session (no multiplexing). With a
+                # control_path (see sshauth.SshMaster) every session rides one
+                # already-authenticated master connection instead.
+                "-o", "ControlMaster=no",
+                "-o", f"ControlPath={self.control_path or 'none'}",
                 *self.ssh_opts]
 
     def session(self):

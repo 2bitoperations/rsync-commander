@@ -42,6 +42,26 @@ def cmd_copy(a):
     dst_ep, dst = parse_loc(a.dst, cache)
     opts = engine.Options(block_size=a.block_size << 20, workers=a.workers,
                           checksum=not a.quick, compression=a.compress, level=a.level)
+    from .sshauth import AuthError, ensure_auth
+    masters = []
+    try:
+        for ep in {id(e): e for e in [srcs[0][0], dst_ep]}.values():
+            if not ep.is_local:
+                m = ensure_auth(ep, a.ssh_mux, log=lambda m: print(m, file=sys.stderr))
+                if m:
+                    masters.append(m)
+    except AuthError as ex:
+        for m in masters:
+            m.close()
+        sys.exit(f"error: {ex}")
+    try:
+        return _copy_run(a, srcs, dst_ep, dst, opts)
+    finally:
+        for m in masters:
+            m.close()
+
+
+def _copy_run(a, srcs, dst_ep, dst, opts):
     job = engine.Job(srcs[0][0], [p for _, p in srcs], dst_ep, dst, opts)
     job.start()
     try:
@@ -93,6 +113,8 @@ def main(argv=None):
     c.add_argument("-l", "--level", type=int, default=0,
                    help="compression level (default: gzip 1, zstd 3)")
     c.add_argument("-v", "--verbose", action="store_true")
+    c.add_argument("--ssh-mux", choices=("auto", "always", "never"), default="auto",
+                   help="auth once per host (see `batch --help`)")
     c.add_argument("--python", default="auto",
                    help="remote interpreter (default: first of python3, python, python2)")
     pr = sub.add_parser("probe", help="show a host's python and codecs")
@@ -114,6 +136,9 @@ def main(argv=None):
                    help="seconds between progress log lines when not on a terminal")
     b.add_argument("-o", "--option", action="append", default=[], metavar="KEY=VALUE",
                    help="override an [options] value, e.g. -o workers=2 -o compression=gzip")
+    b.add_argument("--ssh-mux", choices=("auto", "always", "never"), default="auto",
+                   help="auto: use keys if they work (parallel connections), else ask "
+                        "for the password once and share one connection")
     sub.add_parser("install-app", help="install a launcher with name + icon "
                    "(~/Applications on macOS, a .desktop file on Linux)")
     a = p.parse_args(argv)
@@ -128,7 +153,7 @@ def main(argv=None):
             k, _, v = kv.partition("=")
             ov[k] = {"true": True, "false": False}.get(v.lower(), int(v) if v.isdigit() else v)
         sys.exit(run_batch(a.profile, dry_run=a.dry_run, detect=a.detect, verbose=a.verbose,
-                           interval=a.interval, overrides=ov))
+                           interval=a.interval, overrides=ov, ssh_mux=a.ssh_mux))
     if a.cmd == "install-app":
         from .install import install_app
         print(f"installed {install_app()}")

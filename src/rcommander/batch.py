@@ -6,6 +6,8 @@ Profile reference (see examples/observatory.toml for a full one):
 
     dest = "nas:/volume1/backups/{hostname}"   # host:/path or a local path
     python = "auto"                            # remote interpreter (optional)
+    ssh_mux = "auto"         # auto: keys -> parallel streams; else ONE password
+                             # prompt and all streams share that connection
 
     [options]                # all optional; same meaning as the GUI/CLI options
     workers = 4
@@ -60,6 +62,7 @@ from . import engine
 from .endpoint import LocalEndpoint, RemoteEndpoint
 from .filters import Filter
 from .fmt import fmt_bytes, fmt_dur
+from .sshauth import AuthError, ensure_auth
 
 
 class ProfileError(Exception):
@@ -243,7 +246,8 @@ def _progress(job, interval, tty):
             return s
 
 
-def run(profile_path, dry_run=False, detect=False, verbose=False, interval=30, overrides=None):
+def run(profile_path, dry_run=False, detect=False, verbose=False, interval=30, overrides=None,
+        ssh_mux="auto"):
     try:
         prof = Profile(profile_path, overrides)
         opts = prof.options()
@@ -254,9 +258,17 @@ def run(profile_path, dry_run=False, detect=False, verbose=False, interval=30, o
         print(f"error: {ex}", file=sys.stderr)
         return 2
     status = "failed"
+    master = None
     try:
         dst_ep, dst = prof.dest()
         _log(f"profile {prof.path.name}: dest {dst_ep.label(dst)}")
+        if not detect and not dst_ep.is_local:
+            # Authenticate up front (at most one prompt), before slow local work.
+            try:
+                master = ensure_auth(dst_ep, prof.data.get("ssh_mux", ssh_mux), log=_log)
+            except AuthError as ex:
+                _log(f"ERROR {ex}")
+                return 2
         if not detect and not dry_run:
             prof.run_hooks("before")
         sources, warns, errs = prof.resolve_sources()
@@ -326,4 +338,6 @@ def run(profile_path, dry_run=False, detect=False, verbose=False, interval=30, o
                 prof.run_hooks("after", {"RC_STATUS": status})
             except ProfileError as ex:
                 _log(f"ERROR {ex}")
+        if master:
+            master.close()
         shutil.rmtree(stage, ignore_errors=True)
