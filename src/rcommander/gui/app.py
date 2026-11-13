@@ -240,6 +240,7 @@ class MainWindow(QMainWindow):
         dlg = CopyDialog(self, len(paths), src_key + ":" + posixpath.dirname(paths[0]),
                          dst_panel.ep_key, dst_dir, self.opts)
         if dlg.exec() != QDialog.Accepted:
+            dlg.deleteLater()
             return
         opts = dlg.options()
         self.opts = opts
@@ -247,8 +248,10 @@ class MainWindow(QMainWindow):
                      ("checksum", opts.checksum), ("compression", opts.compression),
                      ("level", opts.level)):
             self.settings.setValue(f"opts/{k}", v)
+        target = dlg.target.text().strip() or dst_dir
+        dlg.deleteLater()      # don't keep one dialog per copy alive until quit
         job = engine.Job(self.endpoint(src_key), paths, self.endpoint(dst_panel.ep_key),
-                         dlg.target.text().strip() or dst_dir, opts)
+                         target, opts)
         job.dst_key = dst_panel.ep_key
         self.mgr.add(job)
 
@@ -306,6 +309,15 @@ class MainWindow(QMainWindow):
                     s.delete(x)
             self._run_op(p, f"delete {len(paths)} item(s)", fn)
 
+    def shutdown(self):
+        """Quiesce before teardown: no timers, no job callbacks into widgets."""
+        self.transfers.timer.stop()
+        for j in self.mgr.jobs:
+            j.on_finished = None
+            if j.t_start is not None and j.state in (engine.J_RUNNING, engine.J_PAUSED,
+                                                     engine.J_PLANNING):
+                j.cancel()
+
     def closeEvent(self, ev):
         running = [j for j in self.mgr.jobs if j.state in (engine.J_RUNNING, engine.J_PAUSED,
                                                              engine.J_PLANNING)
@@ -346,4 +358,27 @@ def run():
     macos.set_display_name(APP_NAME)         # Dock / Cmd-Tab name instead of "python3.x"
     w = MainWindow()
     w.show()
-    return app.exec()
+    rc = app.exec()
+    _teardown(app, w)
+    return rc
+
+
+def _teardown(app, w):
+    """Destroy every widget while QApplication still exists, in Qt's own order.
+
+    Otherwise PySide deletes leftover widget wrappers at interpreter exit
+    (PySide::destroyQCoreApplication) in arbitrary order, and on quit that
+    crashed with a double delete of a QComboBox (SIGSEGV in QObject::~QObject).
+    Deleting the window from the C++ side takes all its children with it and
+    invalidates their Python wrappers, so the exit-time sweep finds no widgets.
+    """
+    import shiboken6
+    from . import util
+    util.shutdown()
+    if shiboken6.isValid(w):
+        w.shutdown()
+        shiboken6.delete(w)
+    for tl in list(app.topLevelWidgets()):
+        if shiboken6.isValid(tl):
+            shiboken6.delete(tl)
+    app.processEvents()

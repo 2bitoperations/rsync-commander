@@ -12,6 +12,14 @@ class _Bridge(QObject):
 
 
 _bridge = None
+_closing = False
+
+
+def shutdown():
+    """At quit: stop delivering results to (soon to be destroyed) widgets."""
+    global _closing
+    _closing = True
+    _pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _ensure():
@@ -28,10 +36,11 @@ def run_async(fn, callback):
 
     def task():
         try:
-            r = fn()
-        except Exception as ex:  # delivered to the callback
-            b.done.emit(callback, None, ex)
-        else:
-            b.done.emit(callback, r, None)
+            r, ex = fn(), None
+        except Exception as e:  # delivered to the callback
+            r, ex = None, e
+        if not _closing:
+            b.done.emit(callback, r, ex)
 
-    _pool.submit(task)
+    if not _closing:
+        _pool.submit(task)
