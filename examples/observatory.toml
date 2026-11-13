@@ -31,9 +31,10 @@ optional = true
 run = "PATH=$PATH:/usr/sbin:/sbin hwinfo > \"$RC_STAGE/reports/hwinfo_report.txt\" 2>/dev/null"
 optional = true
 
-# Directories never backed up, from any source (directory-only, case-insensitive):
-# pointing runs, closed-loop slews, hand-binned "bad" folders, PEC-training runs
-# and TheSkyX's thumbnail cache. Each source below starts with these rules.
+# Never backed up, from any source (case-insensitive): directories of pointing
+# runs, closed-loop slews, hand-binned "bad" frames, PEC-training runs and
+# TheSkyX's thumbnail cache, plus "*CLPA Slew*" files (closed-loop slew frames
+# saved straight into the date folder). Each source below starts with these rules.
 
 # -- images --------------------------------------------------------------------
 [[source]]
@@ -43,11 +44,12 @@ path = [
   "~/Documents/Software Bisque/TheSkyX*/**/*Imager Autosave*",
   "~/Documents/Software Bisque/TheSkyX*/**/Camera AutoSave/Imager",
   "~/Library/Application Support/Software Bisque/TheSkyX*/**/*Imager Autosave*",
+  "~/Library/Application Support/Software Bisque/TheSkyX*/Camera AutoSave/Imager",
 ]
 kind = "dir"
 to = "images/main_imager"
 follow_symlinks = true
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*"]
 exclude = ["*@Focus*", "*Focus*", "*Guide*"]
 
 [[source]]
@@ -57,35 +59,40 @@ path = [
   "~/Documents/Software Bisque/TheSkyX*/**/*Guider Autosave*",
   "~/Documents/Software Bisque/TheSkyX*/**/Camera AutoSave/Guider",
   "~/Library/Application Support/Software Bisque/TheSkyX*/**/*Guider Autosave*",
+  # TheSkyX on Linux: "Autoguider" (may hold only guiding logs, which are kept)
+  "~/Library/Application Support/Software Bisque/TheSkyX*/Camera AutoSave/Autoguider",
+  "~/Software Bisque/TheSkyX*/Camera AutoSave/Autoguider",
 ]
 kind = "dir"
 to = "images/guider"
 follow_symlinks = true
 optional = true
 # keep guider darks, drop every other guider frame
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*", "+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
 
 # -- logs ----------------------------------------------------------------------
 [[source]]
-path = ["~/Software Bisque/TheSkyX*/Logs", "~/Documents/Software Bisque/TheSkyX*/Logs"]
+path = ["~/Software Bisque/TheSkyX*/Logs", "~/Documents/Software Bisque/TheSkyX*/Logs",
+        "~/Library/Application Support/Software Bisque/TheSkyX*/Logs"]
 kind = "dir"
 to = "logs/Logs"
 optional = true
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*"]
 
 [[source]]
-path = ["~/Software Bisque/TheSkyX*/TPoint", "~/Documents/Software Bisque/TheSkyX*/TPoint"]
+path = ["~/Software Bisque/TheSkyX*/TPoint", "~/Documents/Software Bisque/TheSkyX*/TPoint",
+        "~/Library/Application Support/Software Bisque/TheSkyX*/TPoint"]
 kind = "dir"
 to = "logs/TPoint"
 optional = true
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*"]
 
 [[source]]
 path = ["~/Software Bisque/TheSkyX*/Guider", "~/Documents/Software Bisque/TheSkyX*/Guider"]
 kind = "dir"
 to = "logs/Guider"
 optional = true
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/"]
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*"]
 
 # -- settings snapshot -----------------------------------------------------------
 [[archive]]
