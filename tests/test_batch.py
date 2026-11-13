@@ -94,7 +94,10 @@ def fake_home(tmp_path, monkeypatch):
     _w(img / "Guide_star.fit", b"G")
     gd = tsx / "Camera AutoSave" / "Guider" / "2026-11-07"
     _w(gd / "Dark_001.fit", b"D")
-    _w(gd / "guide_0001.fit", b"g")
+    _w(gd / "guide_0001.fit", b"g")                       # manual capture: kept
+    _w(gd / "bad" / "Bias_001.fit", b"b")                  # in a "bad" dir: dropped
+    _w(gd / "2026-11-07-TSX-CLPA Slew-Light-1.fit", b"c")  # CLPA slew: dropped
+    _w(tsx / "Image Calibration" / "Imager Dark Master.fit", b"M")
     _w(tsx / "Logs" / "tsx.log", b"log")
     _w(tsx / "TPoint" / "model.dat", b"tp")
     _w(tsx / "Settings" / "prefs.ini", b"ini")
@@ -128,7 +131,9 @@ def test_observatory_profile(tmp_path, fake_home, capsys):
     snaps = [g for g in got if g.startswith("snapshots/")]
     assert len(snaps) == 1 and snaps[0].endswith(".tar.xz")
     assert [g for g in got if not g.startswith("snapshots/")] == [
+        "calibration/Image Calibration/Imager Dark Master.fit",
         "images/guider/2026-11-07/Dark_001.fit",
+        "images/guider/2026-11-07/guide_0001.fit",
         "images/main_imager/2026-11-07/Light_M42_001.fit",
         "logs/Logs/tsx.log",
         "logs/TPoint/model.dat",

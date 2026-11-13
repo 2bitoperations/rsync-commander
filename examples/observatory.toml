@@ -8,7 +8,8 @@
 #
 # Layout on the destination (same as the old script's staging tree):
 #   {hostname}/images/main_imager/...   light frames (focus/pointing/guide runs dropped)
-#   {hostname}/images/guider/...        guider darks only
+#   {hostname}/images/guider/...        guider calibration frames, manual captures, logs
+#   {hostname}/calibration/Image Calibration/  TheSkyX master darks/biases/flats
 #   {hostname}/logs/{Logs,TPoint,Guider}/
 #   {hostname}/snapshots/tsx_settings_backup_<timestamp>.tar.xz
 #        = TheSkyX config (no FITS, no autosave dirs) + udev rules + system reports
@@ -67,8 +68,18 @@ kind = "dir"
 to = "images/guider"
 follow_symlinks = true
 optional = true
-# keep guider darks, drop every other guider frame
-filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*", "+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
+# keep everything: calibration frames (darks/biases/flats), manual captures and
+# guiding logs. TheSkyX doesn't autosave autoguiding-loop frames.
+filter = ["- *[Pp]ointing [Rr]un*/", "- *[Cc]losed [Ll]oop [Ss]lew*/", "- [Bb][Aa][Dd]/", "- *[Tt]rain*[Pp][Ee][Cc]*/", "- .thumbs/", "- *[Cc][Ll][Pp][Aa] [Ss]lew*"]
+
+# -- calibration library (master darks/biases/flats; FITS are not in the snapshot)
+[[source]]
+path = ["~/Software Bisque/TheSkyX*/Image Calibration",
+        "~/Documents/Software Bisque/TheSkyX*/Image Calibration",
+        "~/Library/Application Support/Software Bisque/TheSkyX*/Image Calibration"]
+kind = "dir"
+to = "calibration/Image Calibration"
+optional = true
 
 # -- logs ----------------------------------------------------------------------
 [[source]]
