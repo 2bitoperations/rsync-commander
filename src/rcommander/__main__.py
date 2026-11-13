@@ -2,6 +2,7 @@
 
     rsync-commander                       # GUI
     rsync-commander copy SRC... DST       # headless; host:/path for remotes
+    rsync-commander install-app           # launcher with name + icon
 """
 
 import argparse
@@ -97,7 +98,13 @@ def main(argv=None):
     iz = sub.add_parser("install-zstd",
                         help="put the zstandard wheel in HOST:~/.rcommander/lib")
     iz.add_argument("host")
+    sub.add_parser("install-app", help="install a launcher with name + icon "
+                   "(~/Applications on macOS, a .desktop file on Linux)")
     a = p.parse_args(argv)
+    if a.cmd == "install-app":
+        from .install import install_app
+        print(f"installed {install_app()}")
+        return
     if a.cmd == "copy":
         sys.exit(cmd_copy(a))
     if a.cmd == "probe":

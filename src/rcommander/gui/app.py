@@ -272,10 +272,20 @@ class MainWindow(QMainWindow):
         ev.accept()
 
 
+APP_NAME = "rsync-commander"
+
+
 def run():
+    from . import macos
+    from .icon import app_icon
+    macos.set_bundle_name(APP_NAME)          # menu bar title (must precede QApplication)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setOrganizationName("2bitoperations")
-    app.setApplicationName("rsync-commander")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setDesktopFileName(APP_NAME)         # Linux: match rsync-commander.desktop
+    app.setWindowIcon(app_icon())            # also the macOS Dock / Cmd-Tab icon
+    macos.set_display_name(APP_NAME)         # Dock / Cmd-Tab name instead of "python3.x"
     w = MainWindow()
     w.show()
     return app.exec()
