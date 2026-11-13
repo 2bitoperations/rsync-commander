@@ -6,10 +6,10 @@ import time
 
 from PySide6.QtCore import (QAbstractTableModel, QMimeData, QModelIndex, QSettings, Qt,
                             QUrl, Signal)
-from PySide6.QtGui import QColor, QKeySequence
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileIconProvider,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QToolButton,
-                               QTreeView, QVBoxLayout, QWidget, QFileIconProvider)
+                               QTreeView, QVBoxLayout, QWidget)
 
 from ..endpoint import browse_call
 from ..fmt import fmt_bytes
@@ -225,10 +225,11 @@ class Panel(QWidget):
     drop_requested = Signal(str, list, str)      # src_ep_key, paths, dst_dir
     focused = Signal(object)
 
-    def __init__(self, name, registry, hosts):
+    def __init__(self, name, registry, hosts, auth=lambda ep: None):
         super().__init__()
         self.name = name
         self.registry = registry                  # callable key -> Endpoint
+        self.auth = auth                          # authenticate(ep), worker thread
         self.ep_key = LOCAL
         self.cwd = "/"
         self.history = {}
@@ -331,7 +332,7 @@ class Panel(QWidget):
                 self._set_status(f"⚠ {key}: {ex}", error=True)
                 return
             self.navigate(home)
-        run_async(ep.home, done)
+        run_async(lambda: (self.auth(ep), ep.home())[1], done)
 
     def navigate(self, path, select=None):
         path = posixpath.normpath(path or "/")
@@ -357,7 +358,7 @@ class Panel(QWidget):
                 posixpath.basename(old_cwd) if posixpath.dirname(old_cwd) == self.cwd else None))
             self._update_status()
 
-        run_async(lambda: browse_call(ep, lambda s: s.listdir(path)), done)
+        run_async(lambda: (self.auth(ep), browse_call(ep, lambda s: s.listdir(path)))[1], done)
 
     def _select_name(self, name):
         row = 0

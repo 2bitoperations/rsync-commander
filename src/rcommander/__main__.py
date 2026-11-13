@@ -146,6 +146,10 @@ def main(argv=None):
     ic.add_argument("--dir", default="~/.local/bin")
     sub.add_parser("install-app", help="install a launcher with name + icon "
                    "(~/Applications on macOS, a .desktop file on Linux)")
+    if argv is None and len(sys.argv) > 1 and sys.argv[1] == "askpass":
+        # ssh's SSH_ASKPASS helper (frozen builds re-run this binary)
+        from .askpass import main as askpass_main
+        sys.exit(askpass_main(sys.argv[2:]))
     a = p.parse_args(argv)
     if a.cmd == "tui":
         from .tui import run as run_tui

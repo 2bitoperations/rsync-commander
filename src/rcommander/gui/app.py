@@ -3,8 +3,9 @@
 import os
 import posixpath
 import sys
+import threading
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
@@ -16,6 +17,40 @@ from ..endpoint import LocalEndpoint, RemoteEndpoint, browse_call, ssh_config_ho
 from .panel import LOCAL, Panel
 from .transfers import JobManager, TransfersPane
 from .util import run_async
+
+
+class PromptBridge(QObject):
+    """Shows ssh prompts (relayed by askpass from another thread) as dialogs on
+    the UI thread and hands the answer back."""
+    _ask = Signal(str, str, object)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_widget = parent
+        self._ask.connect(self._show, Qt.QueuedConnection)
+
+    def ask_blocking(self, prompt, kind):
+        box = {"ev": threading.Event()}
+        self._ask.emit(prompt, kind, box)
+        box["ev"].wait()
+        return box.get("v")
+
+    def _show(self, prompt, kind, box):
+        w, text = self.parent_widget, prompt.strip()
+        try:
+            if kind in ("secret", "text"):
+                v, ok = QInputDialog.getText(
+                    w, "ssh", text,
+                    QLineEdit.Password if kind == "secret" else QLineEdit.Normal)
+                box["v"] = v if ok else None
+            elif kind == "confirm":
+                r = QMessageBox.question(w, "ssh", text)
+                box["v"] = "yes" if r == QMessageBox.Yes else None
+            else:
+                QMessageBox.information(w, "ssh", text)
+                box["v"] = "ok"
+        finally:
+            box["ev"].set()
 
 
 class CopyDialog(QDialog):
@@ -93,8 +128,9 @@ class MainWindow(QMainWindow):
             compression=str(self.settings.value("opts/compression", "zstd")),
             level=int(self.settings.value("opts/level", 0)))
 
-        self.left = Panel("left", self.endpoint, hosts)
-        self.right = Panel("right", self.endpoint, hosts)
+        self._prompts = PromptBridge(self)
+        self.left = Panel("left", self.endpoint, hosts, auth=self.authenticate)
+        self.right = Panel("right", self.endpoint, hosts, auth=self.authenticate)
         self.active = self.left
         for p in (self.left, self.right):
             p.drop_requested.connect(lambda key, paths, dst, p=p: self.copy(key, paths, p, dst))
@@ -157,6 +193,12 @@ class MainWindow(QMainWindow):
         if ep is None:
             ep = self.endpoints[key] = RemoteEndpoint(key)
         return ep
+
+    def authenticate(self, ep):
+        """Worker thread: key auth if it works, else ONE master connection whose
+        prompts appear as dialogs. No-op once done for this endpoint."""
+        if isinstance(ep, RemoteEndpoint):
+            ep.ensure_auth(prompter=self._prompts.ask_blocking)
 
     def other(self, panel):
         return self.right if panel is self.left else self.left

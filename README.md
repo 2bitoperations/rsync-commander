@@ -79,7 +79,10 @@ macOS builds, add these repo secrets:
 own TCP connection. If it doesn't, you're asked once (password or key passphrase)
 for a single master connection that all streams share. That works, but it is
 limited to one TCP stream's throughput, so `ssh-copy-id` is worth it on slow links.
-The GUI and TUI need working keys for now.
+The GUI and TUI work the same way, but ssh's prompts (password, key
+passphrase, new host key) appear as a dialog (masked for secrets). They're relayed
+from ssh's `SSH_ASKPASS` through a private socket, and asked at most once per host
+per session.
 
 Requirements: ssh access to the host and **Python 2.7 or 3.x** on the remote. The app uses the
 first of `python3`, `python`, `python2` on the remote PATH, or the one given with `--python`.
@@ -231,8 +234,6 @@ Put per-host notes in `HOSTS.local.md`. It is gitignored.
 
 - macOS builds are ad-hoc signed until a Developer ID certificate is added to CI
   (see Install). No Intel-Mac build yet.
-- GUI and TUI need working ssh keys. Only `copy` and `batch` do the
-  ask-once password flow.
 
 - Upload progress within a block counts bytes handed to ssh. That runs ahead of the
   real network by up to ssh's buffer (a few MB); download progress is exact.

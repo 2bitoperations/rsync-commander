@@ -349,6 +349,9 @@ class RemoteEndpoint(Endpoint):
         self.python = python
         self.ssh_opts = list(ssh_opts)
         self.control_path = None   # set to share an authenticated ssh master
+        self.master = None         # sshauth.SshMaster owned by this endpoint
+        self._auth_lock = threading.Lock()
+        self._authed = False
         self._browse = None
         self._browse_lock = threading.Lock()
         self._home = None
@@ -385,6 +388,16 @@ class RemoteEndpoint(Endpoint):
                 self._browse = None
             return fn(self.browse())
 
+    def ensure_auth(self, prompter=None, mode="auto", log=lambda m: None):
+        """Authenticate once for the life of this endpoint (GUI/TUI): key auth if
+        it works, else one master connection whose prompts go to `prompter`."""
+        from .sshauth import ensure_auth
+        with self._auth_lock:
+            if self._authed:
+                return
+            self.master = ensure_auth(self, mode, log=log, prompter=prompter)
+            self._authed = True
+
     def home(self):
         if self._home is None:
             self._home = self.browse_call(lambda s: s.call({"op": "hello"})[0]["home"])
@@ -395,6 +408,10 @@ class RemoteEndpoint(Endpoint):
             if self._browse:
                 self._browse.close()
                 self._browse = None
+        if self.master:
+            self.master.close()
+            self.master = None
+            self._authed = False
 
 
 def browse_call(ep, fn):

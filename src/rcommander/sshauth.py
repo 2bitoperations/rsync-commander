@@ -52,15 +52,36 @@ class SshMaster:
                                                 self.ep.host],
                               stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
-    def start(self):
-        # Inherits the terminal: this is the single interactive prompt.
-        r = subprocess.run(_base(self.ep) + [
+    def start(self, prompter=None):
+        """Without a prompter, ssh asks on the terminal. With one (GUI/TUI), every
+        ssh prompt goes to prompter(prompt, kind) through an askpass relay."""
+        argv = _base(self.ep) + [
             "-M", "-N", "-f", "-o", "ControlMaster=yes", "-o", f"ControlPath={self.path}",
             "-o", "ControlPersist=no", "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=4", self.ep.host])
+            "-o", "ServerAliveCountMax=4", self.ep.host]
+        relay = None
+        if prompter is None:
+            r = subprocess.run(argv)                    # the single terminal prompt
+            err = ""
+        else:
+            from .askpass import AskpassServer
+            relay = AskpassServer(prompter)
+            # stderr to a file, not a pipe: the backgrounded (-f) master keeps it
+            # open, and subprocess.run would wait for EOF until the master exits.
+            with tempfile.TemporaryFile("w+") as errf:
+                try:
+                    r = subprocess.run(argv, env={**os.environ, **relay.env()},
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=errf, start_new_session=True)  # no tty: askpass
+                finally:
+                    errf.seek(0)
+                    err = errf.read().strip()
+                    self.prompts = relay.prompts
+                    relay.close()
         if r.returncode != 0 or self._ctl("-O", "check").returncode != 0:
             self.close()
-            raise AuthError(f"could not open an ssh connection to {self.ep.host}")
+            raise AuthError(f"could not open an ssh connection to {self.ep.host}"
+                            + (f": {err.splitlines()[-1]}" if err else ""))
         self.ep.control_path = self.path
         return self
 
@@ -71,9 +92,10 @@ class SshMaster:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
-def ensure_auth(ep, mode="auto", log=print, interactive=None):
+def ensure_auth(ep, mode="auto", log=print, interactive=None, prompter=None):
     """Make `ep` usable by BatchMode sessions. Returns an SshMaster to close()
-    when done, or None if key auth works (or mode is "never")."""
+    when done, or None if key auth works (or mode is "never").
+    prompter(prompt, kind) -> answer: ask through the UI instead of a terminal."""
     if mode not in MODES:
         raise AuthError(f"ssh mux mode must be one of {MODES}")
     if mode == "never":
@@ -84,11 +106,11 @@ def ensure_auth(ep, mode="auto", log=print, interactive=None):
             log(f"ssh {ep.host}: key auth OK, using parallel connections")
             return None
         if interactive is None:
-            interactive = sys.stdin.isatty()
+            interactive = prompter is not None or sys.stdin.isatty()
         if not interactive:
             raise AuthError(
                 f"ssh {ep.host}: no working key ({err or 'auth failed'}) and no terminal to "
                 f"ask for a password. Set up a key (ssh-copy-id {ep.host}) or run interactively.")
         log(f"ssh {ep.host}: no working key; opening one connection (you'll be asked once). "
             f"All streams will share it. Tip: ssh-copy-id {ep.host} for parallel streams.")
-    return SshMaster(ep).start()
+    return SshMaster(ep).start(prompter)

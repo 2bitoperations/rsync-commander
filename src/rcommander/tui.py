@@ -189,6 +189,44 @@ class Confirm(ModalScreen):
         self.dismiss(False)
 
 
+class AuthPrompt(ModalScreen):
+    """An ssh prompt relayed from askpass: password/passphrase (masked), a
+    host-key question (text), yes/no, or a message."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, prompt, kind):
+        super().__init__()
+        self.prompt, self.kind = prompt, kind
+
+    def compose(self):
+        with Vertical(classes="dialog wide"):
+            yield Label("ssh asks:", classes="muted")
+            yield Static(self.prompt.strip())
+            if self.kind in ("secret", "text"):
+                yield Input(password=self.kind == "secret", id="answer")
+            with Horizontal(classes="buttons"):
+                yes = {"confirm": "Yes", "info": "OK"}.get(self.kind, "OK")
+                yield Button(yes, variant="primary", id="ok")
+                if self.kind != "info":
+                    yield Button("Cancel" if self.kind != "confirm" else "No", id="cancel")
+
+    def on_mount(self):
+        (self.query_one("#answer", Input) if self.kind in ("secret", "text")
+         else self.query_one("#ok", Button)).focus()
+
+    @on(Input.Submitted)
+    @on(Button.Pressed, "#ok")
+    def ok(self):
+        if self.kind in ("secret", "text"):
+            self.dismiss(self.query_one("#answer", Input).value)
+        else:
+            self.dismiss("yes")
+
+    @on(Button.Pressed, "#cancel")
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class HostPicker(ModalScreen):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -313,6 +351,7 @@ class Panel(Vertical):
 
         def work():
             try:
+                self.cmdr.authenticate(ep, self)
                 home = ep.home()
                 self.cmdr.call_from_thread(lambda: gen == self._gen and self.navigate(home))
             except Exception as ex:
@@ -328,6 +367,7 @@ class Panel(Vertical):
 
         def work():
             try:
+                self.cmdr.authenticate(ep, self)
                 listing = browse_call(ep, lambda s: s.listdir(path))
             except Exception as ex:
                 self.cmdr.call_from_thread(self.status, f"⚠ {path}: {ex}", True)
@@ -637,6 +677,7 @@ class Commander(App):
     .row { height: auto; }
     .row Label { padding-top: 1; }
     .num { width: 8; }
+    .muted { color: $text-muted; }
     #comp { width: 14; }
     #hosts { height: auto; max-height: 15; }
     TransfersScreen #top { height: auto; }
@@ -685,6 +726,27 @@ class Commander(App):
         if key not in self.endpoints:
             self.endpoints[key] = RemoteEndpoint(key)
         return self.endpoints[key]
+
+    # ssh auth ---------------------------------------------------------------
+    def authenticate(self, ep, panel=None):
+        """Worker thread: key auth if it works, else ONE master connection whose
+        prompts appear as modal dialogs. No-op once done for this endpoint."""
+        if not isinstance(ep, RemoteEndpoint):
+            return
+        if panel is not None and not ep._authed:
+            self.call_from_thread(panel.status, f"connecting to {ep.host}…")
+        ep.ensure_auth(prompter=self.prompt_blocking)
+
+    def prompt_blocking(self, prompt, kind):
+        """Called from the askpass relay thread; waits for the user's answer."""
+        done, box = threading.Event(), {}
+
+        def show():
+            self.push_screen(AuthPrompt(prompt, kind),
+                             lambda v: (box.__setitem__("v", v), done.set()))
+        self.call_from_thread(show)
+        done.wait()
+        return box.get("v")
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="panels"):
