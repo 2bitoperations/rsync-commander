@@ -18,7 +18,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QIcon, QImage, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap, QRadialGradient)
 
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
+ASSETS = (Path(sys._MEIPASS) / "rcommander" / "assets" if getattr(sys, "frozen", False)
+          else Path(__file__).resolve().parent.parent / "assets")
 
 
 def render(size=1024):

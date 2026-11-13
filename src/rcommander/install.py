@@ -34,6 +34,8 @@ def _project_root():
 
 
 def _launch_cmd():
+    if getattr(sys, "frozen", False):   # AppImage / bundled binary: launch it directly
+        return [os.environ.get("APPIMAGE") or sys.executable]
     uv = shutil.which("uv")
     if not uv:
         raise SystemExit("uv not found on PATH")
@@ -41,6 +43,9 @@ def _launch_cmd():
 
 
 def install_macos(dest=None):
+    if getattr(sys, "frozen", False):
+        raise SystemExit("this is already the standalone app; drag it to /Applications "
+                         "(use `install-cli` to put the command on your PATH)")
     app = Path(dest or Path.home() / "Applications") / f"{NAME}.app"
     if app.exists():
         shutil.rmtree(app)
@@ -106,3 +111,24 @@ def install_app():
     if sys.platform.startswith("linux"):
         return install_linux()
     raise SystemExit(f"unsupported platform {sys.platform}")
+
+
+def install_cli(bindir="~/.local/bin"):
+    """Symlink the running binary into bindir. Meant for frozen builds (the .app or
+    AppImage). In a checkout, `uv tool install .` is the better option."""
+    if getattr(sys, "frozen", False):
+        target = Path(os.environ.get("APPIMAGE") or sys.executable)
+    else:
+        target = shutil.which(NAME)
+        if not target:
+            raise SystemExit("not a frozen build and rsync-commander is not on PATH; "
+                             "in a checkout use `uv tool install .`")
+        target = Path(target)
+    d = Path(bindir).expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    link = d / NAME
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(target)
+    on_path = str(d) in os.environ.get("PATH", "").split(os.pathsep)
+    return f"linked {link} -> {target}" + ("" if on_path else f"\n(add {d} to your PATH)")

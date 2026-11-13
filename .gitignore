@@ -12,3 +12,5 @@ __pycache__/
 *.key
 id_*
 .claude/
+build/
+dist/

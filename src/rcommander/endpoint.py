@@ -19,7 +19,19 @@ from pathlib import Path
 
 from . import agent as _agent
 
-AGENT_SRC = Path(_agent.__file__).read_bytes()
+def _agent_source():
+    """The agent's *source* (it is streamed to remote pythons). In a frozen
+    build modules are bytecode, so agent.py ships as a data file next to them."""
+    here = Path(_agent.__file__)
+    for cand in (here, here.with_suffix(".py"),
+                 Path(getattr(sys, "_MEIPASS", "")) / "rcommander" / "agent.py"):
+        if cand.suffix == ".py" and cand.is_file():
+            return cand.read_bytes()
+    from importlib.resources import files
+    return files("rcommander").joinpath("agent.py").read_bytes()
+
+
+AGENT_SRC = _agent_source()
 
 # Runs on the remote under `python -u -c`; must work on Python 2.7 and 3.x.
 BOOTSTRAP = (

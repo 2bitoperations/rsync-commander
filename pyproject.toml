@@ -1,6 +1,6 @@
 [project]
 name = "rsync-commander"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dual-panel file commander that syncs big files over ssh with block-level verification"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,7 @@ dev = ["pytest>=8"]
 # In a checkout, `uv run` includes the GUI by default. On a headless box:
 #   uv run --no-group gui rsync-commander batch profile.toml
 gui = ["PySide6>=6.7"]
+build = ["pyinstaller>=6.11"]   # packaging/: standalone .app/.dmg and AppImage
 
 [tool.uv]
 default-groups = ["dev", "gui"]

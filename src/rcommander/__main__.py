@@ -98,7 +98,9 @@ def _copy_run(a, srcs, dst_ep, dst, opts):
 
 
 def main(argv=None):
+    from . import __version__
     p = argparse.ArgumentParser(prog="rsync-commander")
+    p.add_argument("--version", action="version", version=f"rsync-commander {__version__}")
     sub = p.add_subparsers(dest="cmd")
     c = sub.add_parser("copy", help="copy/sync items into a destination directory")
     c.add_argument("src", nargs="+")
@@ -139,6 +141,9 @@ def main(argv=None):
     b.add_argument("--ssh-mux", choices=("auto", "always", "never"), default="auto",
                    help="auto: use keys if they work (parallel connections), else ask "
                         "for the password once and share one connection")
+    ic = sub.add_parser("install-cli", help="put `rsync-commander` on your PATH "
+                        "(symlink to this binary, default ~/.local/bin)")
+    ic.add_argument("--dir", default="~/.local/bin")
     sub.add_parser("install-app", help="install a launcher with name + icon "
                    "(~/Applications on macOS, a .desktop file on Linux)")
     a = p.parse_args(argv)
@@ -154,6 +159,10 @@ def main(argv=None):
             ov[k] = {"true": True, "false": False}.get(v.lower(), int(v) if v.isdigit() else v)
         sys.exit(run_batch(a.profile, dry_run=a.dry_run, detect=a.detect, verbose=a.verbose,
                            interval=a.interval, overrides=ov, ssh_mux=a.ssh_mux))
+    if a.cmd == "install-cli":
+        from .install import install_cli
+        print(install_cli(a.dir))
+        return
     if a.cmd == "install-app":
         from .install import install_app
         print(f"installed {install_app()}")

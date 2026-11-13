@@ -17,6 +17,36 @@ uv run rsync-commander install-zstd nas       # opt-in zstd helper (see below)
 uv run rsync-commander install-app            # Dock/Spotlight launcher with name + icon
 ```
 
+## Install
+
+Download from [Releases](https://github.com/2bitoperations/rsync-commander/releases):
+
+- **macOS** (Apple Silicon): `rsync-commander-<ver>-macos-arm64.dmg`. Drag the app to
+  Applications. Builds are ad-hoc signed unless a Developer ID is configured, so the
+  first launch needs right-click > Open.
+- **Linux** (x86_64 / aarch64): `rsync-commander-<ver>-linux-<arch>.AppImage`. Run
+  `chmod +x` on it and start it. There's also a `.tar.gz` of the same bundle.
+
+The one binary is the GUI with no arguments and the full CLI with arguments.
+`rsync-commander install-cli` symlinks it into `~/.local/bin`. From the macOS app run
+`/Applications/rsync-commander.app/Contents/MacOS/rsync-commander install-cli`. On Linux,
+`install-app` from the AppImage adds a desktop entry.
+
+From a checkout: `uv run rsync-commander`. Headless boxes can skip Qt with `--no-group gui`.
+
+### Building the installers
+
+`packaging/build_macos.sh` builds the `.app` and `.dmg`, and `packaging/build_linux.sh`
+builds the AppImage and tarball. Both use PyInstaller via the `build` dependency group.
+CI (`.github/workflows/build.yml`) tests and builds macOS arm64, Linux x86_64 and Linux
+aarch64 on every push. Pushing a `v*` tag publishes a release. For signed and notarized
+macOS builds, add these repo secrets:
+
+- `MACOS_CERT_P12` (base64 of a Developer ID Application `.p12`)
+- `MACOS_CERT_PASSWORD`
+- `CODESIGN_IDENTITY`
+- optionally `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, `NOTARY_PASSWORD` (an app-specific password)
+
 ## Using it
 
 - Each panel picks **Local**, any `Host` from `~/.ssh/config`, or a typed `user@host`.
@@ -180,9 +210,8 @@ Put per-host notes in `HOSTS.local.md`. It is gitignored.
 
 ## Known limits / next steps
 
-- **Real installer**: a self-contained, signed .app/.dmg for macOS and an AppImage or
-  package for Linux, so it doesn't depend on a uv checkout. For now
-  `rsync-commander install-app` makes a launcher that runs the checkout.
+- macOS builds are ad-hoc signed until a Developer ID certificate is added to CI
+  (see Install). No Intel-Mac build yet.
 - GUI and TUI need working ssh keys. Only `copy` and `batch` do the
   ask-once password flow.
 
