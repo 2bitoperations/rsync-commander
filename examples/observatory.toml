@@ -1,0 +1,104 @@
+# TheSkyX observatory backup: replaces the old backup_observatory.py.
+#
+#   uv run rsync-commander batch examples/observatory.toml --detect    # show resolved paths
+#   uv run rsync-commander batch examples/observatory.toml --dry-run   # what would be synced
+#   uv run rsync-commander batch examples/observatory.toml             # do it
+#
+# Copy this to observatory.local.toml (gitignored) and set `dest` to your NAS.
+#
+# Layout on the destination (same as the old script's staging tree):
+#   {hostname}/images/main_imager/...   light frames (focus/pointing/guide runs dropped)
+#   {hostname}/images/guider/...        guider darks only
+#   {hostname}/logs/{Logs,TPoint,Guider}/
+#   {hostname}/snapshots/tsx_settings_backup_<timestamp>.tar.xz
+#        = TheSkyX config (no FITS, no autosave dirs) + udev rules + system reports
+
+dest = "nas:/volume1/backups/observatory/{hostname}"
+
+[options]
+workers = 4
+checksum = true          # like rsync --checksum
+compression = "zstd"     # FITS subs compress to ~35-50%
+
+# -- system reports (optional, best with sudo; the old --system-reports) ------
+[[hook]]
+run = "dpkg-query -l > \"$RC_STAGE/reports/installed_packages.txt\""
+optional = true
+[[hook]]
+run = "PATH=$PATH:/usr/sbin:/sbin lshw > \"$RC_STAGE/reports/lshw_report.txt\" 2>/dev/null"
+optional = true
+[[hook]]
+run = "PATH=$PATH:/usr/sbin:/sbin hwinfo > \"$RC_STAGE/reports/hwinfo_report.txt\" 2>/dev/null"
+optional = true
+
+# -- images --------------------------------------------------------------------
+[[source]]
+path = [
+  "~/Software Bisque/TheSkyX*/**/*Imager Autosave*",
+  "~/Software Bisque/TheSkyX*/**/Camera AutoSave/Imager",
+  "~/Documents/Software Bisque/TheSkyX*/**/*Imager Autosave*",
+  "~/Documents/Software Bisque/TheSkyX*/**/Camera AutoSave/Imager",
+  "~/Library/Application Support/Software Bisque/TheSkyX*/**/*Imager Autosave*",
+]
+kind = "dir"
+to = "images/main_imager"
+follow_symlinks = true
+exclude = ["*@Focus*", "*Focus*", "*Closed Loop Slews*", "*Automated Pointing Run*", "*Guide*"]
+
+[[source]]
+path = [
+  "~/Software Bisque/TheSkyX*/**/*Guider Autosave*",
+  "~/Software Bisque/TheSkyX*/**/Camera AutoSave/Guider",
+  "~/Documents/Software Bisque/TheSkyX*/**/*Guider Autosave*",
+  "~/Documents/Software Bisque/TheSkyX*/**/Camera AutoSave/Guider",
+  "~/Library/Application Support/Software Bisque/TheSkyX*/**/*Guider Autosave*",
+]
+kind = "dir"
+to = "images/guider"
+follow_symlinks = true
+optional = true
+# keep guider darks, drop every other guider frame
+filter = ["+ *[Dd]ark*.fit", "+ *[Dd]ark*.fits", "- *.fit", "- *.fits"]
+
+# -- logs ----------------------------------------------------------------------
+[[source]]
+path = ["~/Software Bisque/TheSkyX*/Logs", "~/Documents/Software Bisque/TheSkyX*/Logs"]
+kind = "dir"
+to = "logs/Logs"
+optional = true
+
+[[source]]
+path = ["~/Software Bisque/TheSkyX*/TPoint", "~/Documents/Software Bisque/TheSkyX*/TPoint"]
+kind = "dir"
+to = "logs/TPoint"
+optional = true
+
+[[source]]
+path = ["~/Software Bisque/TheSkyX*/Guider", "~/Documents/Software Bisque/TheSkyX*/Guider"]
+kind = "dir"
+to = "logs/Guider"
+optional = true
+
+# -- settings snapshot -----------------------------------------------------------
+[[archive]]
+to = "snapshots/tsx_settings_backup_{timestamp}.tar.xz"
+
+[[archive.add]]
+path = [
+  "~/Software Bisque/TheSkyX*",
+  "~/Documents/Software Bisque/TheSkyX*",
+  "~/Library/Application Support/Software Bisque/TheSkyX*",
+]
+kind = "dir"
+as = "TheSkyX_Config"
+exclude = ["*.fit", "*.fits", "*Imager Autosave*/", "*Guider Autosave*/", "Camera AutoSave/"]
+
+[[archive.add]]
+path = "/etc/udev/rules.d"
+as = "udev_rules.d"
+optional = true
+
+[[archive.add]]
+path = "{stage}/reports"
+as = "system_reports"
+optional = true

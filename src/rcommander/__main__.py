@@ -1,7 +1,9 @@
 """Entry point.
 
     rsync-commander                       # GUI
-    rsync-commander copy SRC... DST       # headless; host:/path for remotes
+    rsync-commander tui [LEFT] [RIGHT]    # two-panel terminal UI
+    rsync-commander batch PROFILE.toml    # unattended profile run (cron/systemd)
+    rsync-commander copy SRC... DST       # one-shot; host:/path for remotes
     rsync-commander install-app           # launcher with name + icon
 """
 
@@ -98,9 +100,35 @@ def main(argv=None):
     iz = sub.add_parser("install-zstd",
                         help="put the zstandard wheel in HOST:~/.rcommander/lib")
     iz.add_argument("host")
+    t = sub.add_parser("tui", help="two-panel commander in the terminal")
+    t.add_argument("left", nargs="?", help="path or host:/path for the left panel")
+    t.add_argument("right", nargs="?", help="path or host:/path for the right panel")
+    b = sub.add_parser("batch", help="run a TOML sync profile unattended")
+    b.add_argument("profile")
+    b.add_argument("-n", "--dry-run", action="store_true",
+                   help="resolve sources and list what would be synced; transfer nothing")
+    b.add_argument("--detect", action="store_true",
+                   help="only show which paths the profile's globs resolve to")
+    b.add_argument("-v", "--verbose", action="store_true", help="with --dry-run: list files")
+    b.add_argument("--interval", type=int, default=30,
+                   help="seconds between progress log lines when not on a terminal")
+    b.add_argument("-o", "--option", action="append", default=[], metavar="KEY=VALUE",
+                   help="override an [options] value, e.g. -o workers=2 -o compression=gzip")
     sub.add_parser("install-app", help="install a launcher with name + icon "
                    "(~/Applications on macOS, a .desktop file on Linux)")
     a = p.parse_args(argv)
+    if a.cmd == "tui":
+        from .tui import run as run_tui
+        run_tui(a.left, a.right)
+        return
+    if a.cmd == "batch":
+        from .batch import run as run_batch
+        ov = {}
+        for kv in a.option:
+            k, _, v = kv.partition("=")
+            ov[k] = {"true": True, "false": False}.get(v.lower(), int(v) if v.isdigit() else v)
+        sys.exit(run_batch(a.profile, dry_run=a.dry_run, detect=a.detect, verbose=a.verbose,
+                           interval=a.interval, overrides=ov))
     if a.cmd == "install-app":
         from .install import install_app
         print(f"installed {install_app()}")
@@ -115,7 +143,12 @@ def main(argv=None):
     if a.cmd == "install-zstd":
         from .helpers import install_zstd
         sys.exit(0 if install_zstd(a.host) else 1)
-    from .gui.app import run
+    try:
+        from .gui.app import run
+    except ImportError as ex:
+        sys.exit(f"GUI unavailable ({ex}).\n"
+                 "Install it with `uv sync --group gui` (or pip install 'rsync-commander[gui]'),\n"
+                 "or use the terminal UI: rsync-commander tui")
     sys.exit(run())
 
 

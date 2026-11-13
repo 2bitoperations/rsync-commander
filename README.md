@@ -6,12 +6,15 @@ ssh. Every block is checksummed, only out-of-date blocks are sent, and the
 transfer view shows every block of every file.
 
 ```sh
-uv run rsync-commander                                   # GUI
-uv run rsync-commander copy ~/astro/M42 nas:/volume1/astro   # headless
+uv run rsync-commander                                   # GUI (Qt)
+uv run rsync-commander tui ~/astro nas:/volume1/astro    # same thing in a terminal
+uv run rsync-commander batch examples/observatory.toml   # unattended profile run
+uv run rsync-commander copy ~/astro/M42 nas:/volume1/astro   # one-shot copy
 uv run rsync-commander copy nas:/volume1/astro/M42 ~/astro -j 6 -v
 uv run rsync-commander copy -z gzip --python python2 ~/astro/M42 user@host:/data
 uv run rsync-commander probe nas              # remote python + codecs
 uv run rsync-commander install-zstd nas       # opt-in zstd helper (see below)
+uv run rsync-commander install-app            # Dock/Spotlight launcher with name + icon
 ```
 
 ## Using it
@@ -67,6 +70,57 @@ package, or in a `zstd` binary on PATH. If either end lacks it, the job falls ba
 to gzip and says so in Notes. `install-zstd HOST` puts a matching
 `zstandard` wheel in `HOST:~/.rcommander/lib`. It is downloaded here, since NAS boxes have no pip.
 Remove it with `rm -rf ~/.rcommander`.
+
+## Terminal UI
+
+`rsync-commander tui [LEFT] [RIGHT]` is the same commander in the terminal (Textual),
+so it also works over ssh on a headless box. It uses the same keys as the GUI: Tab,
+Enter, Backspace, Space/Insert to mark, F2 host, Ctrl+L go to path, F5 copy, F6 rename,
+F7 mkdir, F8 delete, F9 transfers, F10 quit. The mouse works too, and the footer is clickable.
+
+Progress uses btop-style `■` meters, with the gradient laid across the full width,
+and a braille speed graph. **F9** opens the transfer detail: totals, checksum meter,
+a meter per stream for the block it is on, per-file meters, and a block map of the
+active file (`f` follows the active file, `[` `]` switch jobs, `p` pauses, `c` cancels).
+
+## Batch profiles
+
+`rsync-commander batch PROFILE.toml` runs a sync described in TOML, for cron, systemd
+timers or a quick `ssh box rsync-commander batch ...`.
+`--detect` shows what the globs resolve to. `--dry-run [-v]` lists what would be synced.
+`-o key=value` overrides `[options]`. Progress goes to stdout as a live line on
+a terminal, or as timestamped log lines otherwise (`--interval`). Exit code: 0 ok,
+1 transfer errors, 2 profile/config errors.
+
+A profile has:
+
+- `dest`: `host:/path` or a local path.
+- `[options]`: workers, block_size_mib, checksum, compression, level.
+- `[[source]]`: glob paths (first match wins), `to` (a path under dest),
+  rsync-style filters (`+ pattern` / `- pattern`, first match wins, excluded
+  dirs are pruned), and `follow_symlinks`.
+- `[[hook]]`: shell commands to run before or after.
+- `[[archive]]`: pack paths into a timestamped `.tar.xz` that is synced too.
+
+String fields can use `{hostname}`, `{date}`, `{timestamp}`, `{user}`, `{home}` and
+`{stage}`. The full reference is the docstring of `src/rcommander/batch.py`.
+
+`examples/observatory.toml` replaces the old `observatory-backup` script. It
+produces the same destination layout:
+
+- light frames, minus focus/pointing/slew/guide runs;
+- guider darks only;
+- the TheSkyX logs;
+- a settings snapshot tarball with the config, udev rules and system reports.
+
+Put your real destination in a copy named `*.local.toml`. Files with that name are gitignored.
+
+**Headless boxes** don't need Qt:
+
+```sh
+uv run --no-group gui rsync-commander batch observatory.local.toml
+uv run --no-group gui rsync-commander tui
+```
 
 ## How it works
 

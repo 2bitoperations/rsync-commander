@@ -283,14 +283,18 @@ class Handler(object):
         Symlinks are reported (type l) but not followed."""
         root = req["path"].rstrip("/") or "/"
         excludes = tuple(req.get("excludes", DEFAULT_EXCLUDES))
+        follow = bool(req.get("follow_symlinks"))
         base = os.path.dirname(root)
         out = []
-        st = _stat_or_none(root, follow=False)
+        # The root itself is always followed (like `rsync src/`); inner links only
+        # with follow_symlinks (like rsync -L).
+        st = _stat_or_none(root, follow=True) or _stat_or_none(root, follow=False)
         if st is None:
             return {"exists": False, "entries": []}, b""
         top = _entry(os.path.basename(root), st)
         top["rel"] = _text(os.path.basename(root))
         out.append(top)
+        seen = set([(st.st_dev, st.st_ino)])
         if top["type"] == "d":
             stack = [root]
             while stack:
@@ -308,11 +312,20 @@ class Handler(object):
                     st = _stat_or_none(full, follow=False)
                     if st is None:
                         continue
+                    if follow and _stat.S_ISLNK(st.st_mode):
+                        st = _stat_or_none(full, follow=True) or st  # dangling: stays "l"
                     e = _entry(name, st)
                     e["rel"] = _text(os.path.relpath(full, base))
-                    out.append(e)
                     if e["type"] == "d":
+                        key = (st.st_dev, st.st_ino)
+                        if key in seen:  # symlink loop / already visited
+                            e["type"] = "l"
+                            e["loop"] = True
+                            out.append(e)
+                            continue
+                        seen.add(key)
                         stack.append(full)
+                    out.append(e)
         return {"exists": True, "entries": out}, b""
 
     # -- file management ---------------------------------------------------

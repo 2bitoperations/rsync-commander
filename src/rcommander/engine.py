@@ -46,6 +46,20 @@ CODEC_OF = {"none": None, "gzip": "zlib", "zstd": "zstd"}
 
 
 @dataclass
+class Source:
+    """One thing to copy. `to` is its path under the destination directory
+    (default: its own basename); `filter` is a filters.Filter."""
+    path: str
+    to: str = None
+    filter: object = None
+    follow_symlinks: bool = False
+
+    @property
+    def name(self):
+        return posixpath.basename(self.path.rstrip("/")) or "/"
+
+
+@dataclass
 class Options:
     block_size: int = 4 << 20
     workers: int = 4
@@ -158,10 +172,11 @@ class Snapshot:
 class Job:
     _ids = itertools.count(1)
 
-    def __init__(self, src_ep, src_paths, dst_ep, dst_dir, opts=None, title=None):
+    def __init__(self, src_ep, src_paths, dst_ep, dst_dir, opts=None, title=None, dry_run=False):
         self.id = next(self._ids)
         self.src_ep, self.dst_ep = src_ep, dst_ep
-        self.src_paths = list(src_paths)
+        self.sources = [s if isinstance(s, Source) else Source(s) for s in src_paths]
+        self.src_paths = [s.path for s in self.sources]
         self.dst_dir = dst_dir
         self.opts = opts or Options()
         names = ", ".join(posixpath.basename(p.rstrip("/")) for p in self.src_paths[:3])
@@ -193,6 +208,8 @@ class Job:
         self.winfo = []
         self._threads = []
         self.on_finished = None   # callback(job) from the last worker thread
+        self.dry_run = dry_run    # plan only: walk + filter, transfer nothing
+        self.filtered_out = 0
 
     # -- lifecycle -----------------------------------------------------------
     def start(self):
@@ -231,6 +248,13 @@ class Job:
             if self.on_finished:
                 self.on_finished(self)
             return
+        if self.dry_run:
+            with self.lock:
+                self.t_end = time.time()
+                self.state = J_FAILED if self.errors else J_DONE
+            if self.on_finished:
+                self.on_finished(self)
+            return
         with self.lock:
             if self.cancelled:
                 self.state = J_CANCELLED
@@ -263,22 +287,34 @@ class Job:
         try:
             self._resolve_codec(s_src, s_dst)
             dirs = []
-            for sp in self.src_paths:
-                sp = sp.rstrip("/") or "/"
+            for src in self.sources:
+                sp = src.path.rstrip("/") or "/"
                 base = posixpath.dirname(sp)
-                w = s_src.walk(sp)
+                req = {"op": "walk", "path": sp}
+                if src.follow_symlinks:
+                    req["follow_symlinks"] = True
+                w = s_src.call(req)[0]
                 if not w.get("exists"):
                     self.errors.append((sp, "source does not exist"))
                     continue
-                for e in w["entries"]:
+                entries = w["entries"]
+                top = entries[0]["rel"] if entries else src.name
+                if src.filter:
+                    before = len(entries)
+                    entries = src.filter.apply(entries, prefix=top)
+                    self.filtered_out += before - len(entries)
+                to = (src.to or top).strip("/")
+                for e in entries:
                     if self.cancelled:
                         return
+                    # rel under the source's own name -> rel under `to`
                     rel = e["rel"]
+                    out_rel = to + rel[len(top):] if rel.startswith(top) else rel
                     if e["type"] == "d":
-                        dirs.append(posixpath.join(self.dst_dir, rel))
+                        dirs.append(posixpath.join(self.dst_dir, out_rel))
                     elif e["type"] == "f":
-                        ft = FileTask(rel, posixpath.join(base, rel),
-                                      posixpath.join(self.dst_dir, rel),
+                        ft = FileTask(out_rel, posixpath.join(base, rel),
+                                      posixpath.join(self.dst_dir, out_rel),
                                       e["size"], e["mtime_ns"], e["mode"],
                                       self.opts.block_size)
                         self.files.append(ft)
@@ -287,6 +323,8 @@ class Job:
                         self.log.append(f"skipped symlink {rel}")
                     elif e["type"] == "err":
                         self.errors.append((rel, e.get("error", "unreadable")))
+            if self.dry_run:
+                return
             if dirs:
                 for i in range(0, len(dirs), 500):
                     s_dst.mkdirs(dirs[i:i + 500])
