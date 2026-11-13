@@ -39,7 +39,7 @@ import subprocess
 import sys
 import zlib
 
-AGENT_VERSION = 2
+AGENT_VERSION = 3
 HDR = struct.Struct(">II")
 PY2 = sys.version_info[0] == 2
 
@@ -486,6 +486,108 @@ class Handler(object):
         if part and part != final:
             os.rename(part, final)
         return {}, b""
+
+    # -- small-file batches (one round trip for many files) ------------------
+    def op_probe_many(self, req, payload):
+        """For each path: None (missing / not a file) or {size, mtime_ns[, sha1]}.
+        sha1 (whole file) only with hash=true and size <= hash_max."""
+        want, hmax = req.get("hash"), int(req.get("hash_max", 1 << 24))
+        out = []
+        for p in req["paths"]:
+            st = _stat_or_none(p)
+            if st is None or not _stat.S_ISREG(st.st_mode):
+                out.append(None)
+                continue
+            e = {"size": st.st_size, "mtime_ns": _mtime_ns(st)}
+            if want and st.st_size <= hmax:
+                try:
+                    f = open(p, "rb")
+                    try:
+                        e["sha1"] = hashlib.sha1(f.read()).hexdigest()
+                    finally:
+                        f.close()
+                except EnvironmentError:
+                    pass
+            out.append(e)
+        return {"files": out}, b""
+
+    def op_read_many(self, req, payload):
+        """Whole small files, concatenated into one payload (compressed as one
+        blob, which also compresses better than many tiny ones)."""
+        parts, info = [], []
+        for p in req["paths"]:
+            try:
+                f = open(p, "rb")
+                try:
+                    data = f.read()
+                finally:
+                    f.close()
+            except EnvironmentError as ex:
+                info.append({"error": _errmsg(ex)})
+                continue
+            info.append({"len": len(data), "sha1": hashlib.sha1(data).hexdigest()})
+            parts.append(data)
+        blob = b"".join(parts)
+        resp = {"files": info, "rawlen": len(blob), "z": False}
+        codec = req.get("codec")
+        if codec and codec in CODECS and blob:
+            zd = compress(codec, int(req.get("level", 1)), blob)
+            if len(zd) < len(blob) * 0.92:
+                resp["z"] = codec
+                blob = zd
+        return resp, blob
+
+    def op_put_many(self, req, payload):
+        """Write several whole files: verify sha1, write to the .rcpart name, set
+        mtime/mode, rename into place. Also `touch` (path, mtime_ns) pairs.
+        Per-file errors are returned rather than raised."""
+        data = payload
+        z = req.get("z")
+        if z:
+            if z not in CODECS:
+                raise AgentError("codec %s not available here" % z)
+            data = decompress(z, data)
+        errors, off = [], 0
+        do_sync = req.get("fsync", True)
+        for f in req["files"]:
+            n = int(f["len"])
+            chunk = data[off:off + n]
+            off += n
+            try:
+                if hashlib.sha1(chunk).hexdigest() != f["sha1"]:
+                    raise AgentError("checksum mismatch on receive")
+                final = f["final"]
+                parent = os.path.dirname(final)
+                if parent:
+                    _makedirs(parent)
+                part = partial_name(final)
+                fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                try:
+                    _write_at(fd, 0, chunk)
+                    if do_sync:
+                        os.fsync(fd)
+                finally:
+                    os.close(fd)
+                _set_mtime(part, int(f["mtime_ns"]))
+                if f.get("mode") is not None:
+                    try:
+                        os.chmod(part, int(f["mode"]))
+                    except EnvironmentError:
+                        pass
+                os.rename(part, final)
+                errors.append(None)
+            except AgentError as ex:
+                errors.append(str(ex))
+            except EnvironmentError as ex:
+                errors.append(_errmsg(ex))
+        touch_errors = []
+        for path, mtime_ns in req.get("touch", []):
+            try:
+                _set_mtime(path, int(mtime_ns))
+                touch_errors.append(None)
+            except EnvironmentError as ex:
+                touch_errors.append(_errmsg(ex))
+        return {"errors": errors, "touch_errors": touch_errors}, b""
 
     def op_touch_meta(self, req, payload):
         _set_mtime(req["path"], int(req["mtime_ns"]))

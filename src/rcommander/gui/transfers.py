@@ -509,8 +509,8 @@ class TransfersPane(QWidget):
                 nb = f"/{f.nblocks}" if f else ""
                 it.setData(2, Qt.UserRole, {
                     "segs": [(min(1.0, info.moved / info.total), SEG_ACTIVE)],
-                    "text": f"block {info.block + 1}{nb} · {fmt_bytes(info.moved)}"
-                            f" / {fmt_bytes(info.total)}"})
+                    "text": f"{info.label or f'block {info.block + 1}{nb}'} · "
+                            f"{fmt_bytes(info.moved)} / {fmt_bytes(info.total)}"})
                 it.setText(2, "")
             else:
                 it.setData(2, Qt.UserRole, None)

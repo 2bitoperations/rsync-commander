@@ -145,6 +145,49 @@ class Session:
         self.call(req, payload, progress=progress)
         return len(payload)
 
+    # -- small-file batches ---------------------------------------------------
+    def probe_many(self, paths, hash=False):
+        return self.call({"op": "probe_many", "paths": list(paths), "hash": hash})[0]["files"]
+
+    def read_many(self, paths, codec=None, level=1, progress=None):
+        """-> ([(data|None, sha1|None, error|None) per path], wire_bytes)"""
+        req = {"op": "read_many", "paths": list(paths)}
+        if codec and self.wire_compress and codec in self.codecs:
+            req["codec"], req["level"] = codec, level
+        resp, blob = self.call(req, progress=progress)
+        wire = len(blob) if self.wire_compress else 0
+        if resp.get("z"):
+            blob = _agent.decompress(resp["z"], blob)
+        out, off = [], 0
+        for e in resp["files"]:
+            if "error" in e:
+                out.append((None, None, e["error"]))
+                continue
+            d = blob[off:off + e["len"]]
+            off += e["len"]
+            if hashlib.sha1(d).hexdigest() != e["sha1"]:
+                raise ConnectionLost("batch checksum mismatch after read")
+            out.append((d, e["sha1"], None))
+        return out, wire
+
+    def put_many(self, files, blobs, codec=None, level=1, progress=None, touch=()):
+        """files: [{final, len, sha1, mtime_ns, mode}] matching blobs.
+        -> (errors per file, touch errors, wire_bytes)"""
+        data = b"".join(blobs)
+        req = {"op": "put_many", "files": files, "touch": [list(t) for t in touch]}
+        payload = data
+        if codec and self.wire_compress and data and codec in self.codecs:
+            zd = _agent.compress(codec, level, data)
+            if len(zd) < len(data) * 0.92:
+                req["z"] = codec
+                payload = zd
+        if progress is not None and payload is not data and payload:
+            scale = len(data) / len(payload)
+            inner = progress
+            progress = lambda k: inner(k * scale)  # noqa: E731
+        resp = self.call(req, payload, progress=progress)[0]
+        return resp["errors"], resp.get("touch_errors", []), (len(payload) if self.wire_compress else 0)
+
     def prepare(self, final):
         return self.call({"op": "prepare", "final": final})[0]
 

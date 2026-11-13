@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 
 from .endpoint import ConnectionLost, RemoteError
+from .fmt import fmt_bytes as fmt_size
 
 # Block states (stored in a bytearray per file for cheap painting).
 B_UNKNOWN, B_PENDING, B_HASHING, B_SAME, B_ACTIVE, B_DONE, B_FAILED = range(7)
@@ -68,6 +69,11 @@ class Options:
     level: int = 0             # 0 = codec default (gzip 1, zstd 3)
     hash_batch: int = 16       # blocks per hash request
     max_retries: int = 6
+    # Files up to small_file_max (and one block) go in batches: one round trip
+    # per batch per step instead of 3-4 per file.
+    small_file_max: int = 1 << 20
+    batch_files: int = 64
+    batch_bytes: int = 8 << 20
 
 
 class FileTask:
@@ -121,12 +127,14 @@ class FileTask:
 
 @dataclass
 class Work:
-    kind: str                 # prepare | hash | clone | block | finalize
+    kind: str                 # prepare | hash | clone | block | finalize | batch
     f: FileTask
     side: str = ""
     start: int = 0
     count: int = 0
     tries: int = 0
+    files: list = None        # batch: the small FileTasks
+    moved: float = 0.0        # batch: bytes moved so far (in flight)
 
 
 WORKER_HIST = 120      # samples of per-stream throughput kept for sparklines
@@ -143,6 +151,7 @@ class WorkerInfo:
     total: int = 0
     state: str = "idle"       # idle | busy | reconnecting | stopped
     t0: float = 0.0
+    label: str = ""           # progress-bar label override (e.g. "batch of 64")
     bytes: float = 0.0        # cumulative logical bytes this stream has moved
     rate: float = 0.0         # bytes/s over the last few seconds (set by snapshot)
     hist: list = field(default_factory=list)   # recent rates, oldest first
@@ -219,6 +228,9 @@ class Job:
         self._threads = []
         self.on_finished = None   # callback(job) from the last worker thread
         self.dry_run = dry_run    # plan only: walk + filter, transfer nothing
+        self.batch_retry = collections.deque()   # batches whose connection dropped
+        self.batches_inflight = 0
+        self.batch_moved = 0.0    # in-flight bytes of running batches
         self.filtered_out = 0
 
     # -- lifecycle -----------------------------------------------------------
@@ -378,13 +390,22 @@ class Job:
                 self.cv.wait(0.5)
 
     def _all_done(self):
-        return self.next_idx >= len(self.files) and not self.active
+        return (self.next_idx >= len(self.files) and not self.active
+                and not self.batches_inflight and not self.batch_retry)
+
+    def _is_small(self, f):
+        return f.size <= min(self.opts.small_file_max, self.opts.block_size)
 
     def _pick(self):
+        if self.batch_retry:
+            self.batches_inflight += 1
+            return self.batch_retry.popleft()
         for f in self.active:
             w = self._pick_in(f)
             if w is not None:
                 return w
+        if self.next_idx < len(self.files) and self._is_small(self.files[self.next_idx]):
+            return self._gather_batch()
         max_open = self.opts.workers + 2
         if self.next_idx < len(self.files) and len(self.active) < max_open:
             f = self.files[self.next_idx]
@@ -395,6 +416,23 @@ class Job:
             f.inflight += 1
             return Work("prepare", f)
         return None
+
+    def _gather_batch(self):
+        """Consecutive small files from the queue, up to the batch limits."""
+        batch, total = [], 0
+        now = time.time()
+        while self.next_idx < len(self.files) and len(batch) < self.opts.batch_files:
+            f = self.files[self.next_idx]
+            if not self._is_small(f) or (batch and total + f.size > self.opts.batch_bytes):
+                break
+            self.next_idx += 1
+            batch.append(f)
+            total += f.size
+            f.state = F_PREPARING
+            f.started_at = now
+            f.bytes_needed = f.size            # assume it's sent until probed
+        self.batches_inflight += 1
+        return Work("batch", batch[0], files=batch, count=total)
 
     def _pick_in(self, f):
         if f.state == F_QUEUED:  # prepare being retried after a lost connection
@@ -437,6 +475,55 @@ class Job:
         if f in self.active:
             self.active.remove(f)
         self.cv.notify_all()
+
+    # -- batch results --------------------------------------------------------
+    def batch_progress(self, w, n):
+        with self.lock:
+            w.moved += n
+            self.batch_moved += n
+
+    def batch_sending(self, files):
+        with self.lock:
+            for f in files:
+                f.state = F_WORKING
+                for i in range(f.nblocks):
+                    f.blocks[i] = B_ACTIVE
+
+    def done_batch(self, w, same, sent, failed, wire, legs):
+        """same: identical files; sent: files written; failed: [(f, msg)]."""
+        with self.lock:
+            self.batches_inflight -= 1
+            self.batch_moved = max(0.0, self.batch_moved - w.moved)
+            w.moved = 0.0
+            self.wire_bytes += wire
+            for f in same:
+                f.blocks[:] = bytes([B_SAME]) * f.nblocks
+                f.bytes_needed, f.bytes_same, f.remaining = 0, f.size, 0
+                self._retire(f, F_SKIPPED)
+            for f in sent:
+                f.blocks[:] = bytes([B_DONE]) * f.nblocks
+                f.bytes_done, f.remaining = f.size, 0
+                self.bytes_done += f.size
+                self.net_logical += f.size * legs
+                self._retire(f, F_DONE)
+            for f, msg in failed:
+                f.blocks[:] = bytes([B_FAILED]) * f.nblocks
+                self._retire(f, F_FAILED, msg)
+            self.cv.notify_all()
+
+    def requeue_batch(self, w):
+        with self.lock:
+            self.batches_inflight -= 1
+            self.batch_moved = max(0.0, self.batch_moved - w.moved)
+            w.moved = 0.0
+            for f in w.files:
+                f.state = F_PREPARING
+                f.blocks[:] = bytes(f.nblocks)
+            self.batch_retry.append(w)
+            self.cv.notify_all()
+
+    def fail_batch(self, w, msg):
+        self.done_batch(w, [], [], [(f, f"batch: {msg}") for f in w.files], 0, 0)
 
     # -- results (called by workers) -----------------------------------------
     def done_prepare(self, w, resp):
@@ -591,7 +678,8 @@ class Job:
     def snapshot(self):
         now = time.time()
         with self.lock:
-            inflight = sum(sum(f.block_progress.values()) for f in self.active)
+            inflight = (sum(sum(f.block_progress.values()) for f in self.active)
+                        + self.batch_moved)
             done = self.bytes_done + inflight
             self._samples.append((now, done, self.wire_bytes))
             rate = wire_rate = 0.0
@@ -681,9 +769,70 @@ class Worker:
             info.state, info.desc = "stopped", "stopped"
             self._drop_sessions()
 
+    def _do_batch(self, w):
+        """Many small files in a handful of round trips:
+        probe dst (+ src hashes if needed) -> read_many -> put_many."""
+        job, info, files = self.job, self.info, w.files
+        info.block, info.total, info.moved = 0, w.count, 0
+        info.label = f"batch of {len(files)}"
+        info.desc = f"{len(files)} small files ({fmt_size(w.count)}) from {files[0].rel}"
+        src, dst = self._sess("src"), self._sess("dst")
+        checksum = job.opts.checksum
+        probes = dst.probe_many([f.dst_path for f in files], hash=checksum)
+        send, same, touch, need_hash = [], [], [], []
+        for f, p in zip(files, probes):
+            if p is None or p["size"] != f.size:
+                send.append(f)
+            elif not checksum:
+                (same if p["mtime_ns"] // 10**9 == f.mtime_ns // 10**9 else send).append(f)
+            else:
+                need_hash.append((f, p))
+        if need_hash:
+            shs = src.probe_many([f.src_path for f, _ in need_hash], hash=True)
+            for (f, p), sp in zip(need_hash, shs):
+                if sp and sp.get("sha1") and sp["sha1"] == p.get("sha1"):
+                    same.append(f)
+                    if p["mtime_ns"] != f.mtime_ns:
+                        touch.append((f.dst_path, f.mtime_ns))
+                else:
+                    send.append(f)
+        src_local, dst_local = job.src_ep.is_local, job.dst_ep.is_local
+
+        def prog(k):
+            info.moved += k
+            info.bytes += k
+            job.batch_progress(w, k)
+        sent, failed, wire = [], [], 0
+        if send:
+            job.batch_sending(send)
+            data, win = src.read_many([f.src_path for f in send], job.codec, job.level,
+                                      progress=None if src_local else prog)
+            ok, blobs, metas = [], [], []
+            for f, (d, sha, err) in zip(send, data):
+                if err or len(d) != f.size:
+                    failed.append((f, err or "source changed size while reading"))
+                    continue
+                ok.append(f)
+                blobs.append(d)
+                metas.append({"final": f.dst_path, "len": len(d), "sha1": sha,
+                              "mtime_ns": f.mtime_ns, "mode": f.mode})
+            errs, terrs, wout = dst.put_many(
+                metas, blobs, job.codec, job.level,
+                progress=prog if src_local and not dst_local else None, touch=touch)
+            for f, e in zip(ok, errs):
+                (failed.append((f, e)) if e else sent.append(f))
+            wire = (0 if src_local else win) + (0 if dst_local else wout)
+            if src_local and dst_local:
+                info.bytes += sum(f.size for f in sent)
+        elif touch:
+            dst.put_many([], [], touch=touch)
+        legs = (0 if src_local else 1) + (0 if dst_local else 1)
+        job.done_batch(w, same, sent, failed, wire, legs)
+
     def _do(self, w):
         job, info = self.job, self.info
         info.state, info.file_id, info.block, info.moved, info.total = "busy", w.f.id, -1, 0, 0
+        info.label = ""
         info.t0 = time.time()
         f = w.f
         try:
@@ -727,6 +876,8 @@ class Worker:
                 if not rprog and not wprog:
                     info.bytes += n    # local->local: no in-flight progress, count on completion
                 job.done_block(w, wire, n * legs)
+            elif w.kind == "batch":
+                self._do_batch(w)
             elif w.kind == "finalize":
                 info.desc = f"finalize {f.rel}"
                 d = self._sess("dst")
@@ -738,13 +889,15 @@ class Worker:
         except ConnectionLost as ex:
             self._drop_sessions()
             w.tries += 1
+            batch = w.kind == "batch"
             if job.cancelled:
-                job.requeue(w)
+                (job.requeue_batch if batch else job.requeue)(w)
                 return
             if w.tries > job.opts.max_retries:
-                job.failed(w, f"connection lost {w.tries} times: {ex}")
+                msg = f"connection lost {w.tries} times: {ex}"
+                job.fail_batch(w, msg) if batch else job.failed(w, msg)
                 return
-            job.requeue(w)
+            (job.requeue_batch if batch else job.requeue)(w)
             info.state = "reconnecting"
             info.desc = f"reconnecting ({ex})"
             delay = min(30, 2 ** w.tries)
@@ -752,8 +905,9 @@ class Worker:
             while time.time() < end and not job.cancelled:
                 time.sleep(0.2)
         except RemoteError as ex:
-            job.failed(w, str(ex))
-        except Exception as ex:  # bug or unexpected: fail the file, keep going
-            job.failed(w, f"{type(ex).__name__}: {ex}")
+            job.fail_batch(w, str(ex)) if w.kind == "batch" else job.failed(w, str(ex))
+        except Exception as ex:  # bug or unexpected: fail the file(s), keep going
+            msg = f"{type(ex).__name__}: {ex}"
+            job.fail_batch(w, msg) if w.kind == "batch" else job.failed(w, msg)
         finally:
             info.state = "idle" if info.state == "busy" else info.state
