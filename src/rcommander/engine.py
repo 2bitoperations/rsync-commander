@@ -129,6 +129,10 @@ class Work:
     tries: int = 0
 
 
+WORKER_HIST = 120      # samples of per-stream throughput kept for sparklines
+WORKER_SAMPLE = 0.5    # seconds between samples
+
+
 @dataclass
 class WorkerInfo:
     idx: int
@@ -139,6 +143,9 @@ class WorkerInfo:
     total: int = 0
     state: str = "idle"       # idle | busy | reconnecting | stopped
     t0: float = 0.0
+    bytes: float = 0.0        # cumulative logical bytes this stream has moved
+    rate: float = 0.0         # bytes/s over the last few seconds (set by snapshot)
+    hist: list = field(default_factory=list)   # recent rates, oldest first
 
 
 @dataclass
@@ -204,6 +211,9 @@ class Job:
         self.codec = None
         self.level = 1
         self._samples = collections.deque(maxlen=64)   # (t, logical, wire)
+        self._wsamples = collections.deque(maxlen=64)  # (t, [bytes per worker])
+        self._whist = []                                # per worker: deque of rates
+        self._whist_t = 0.0
         self.workers = []
         self.winfo = []
         self._threads = []
@@ -262,6 +272,7 @@ class Job:
                 self.state = J_PAUSED if self.paused else J_RUNNING
         n = max(1, self.opts.workers)
         self.winfo = [WorkerInfo(i) for i in range(n)]
+        self._whist = [collections.deque(maxlen=WORKER_HIST) for _ in range(n)]
         self.workers = [Worker(self, self.winfo[i]) for i in range(n)]
         threads = [threading.Thread(target=w.run, name=f"job{self.id}-w{w.info.idx}",
                                     daemon=True) for w in self.workers]
@@ -554,6 +565,29 @@ class Job:
             self.cv.notify_all()
 
     # -- stats ---------------------------------------------------------------
+    def _worker_stats(self, now):
+        """Per-stream throughput: rate over the last ~3 s plus a short history,
+        sampled at most every WORKER_SAMPLE seconds. Called under self.lock."""
+        cur = [w.bytes for w in self.winfo]
+        self._wsamples.append((now, cur))
+        old = next((s for s in self._wsamples if now - s[0] <= 3.0), None)
+        running = self.state in (J_RUNNING, J_PAUSED)
+        rates = [0.0] * len(cur)
+        if old and now - old[0] > 0.2 and len(old[1]) == len(cur):
+            dt = now - old[0]
+            rates = [max(0.0, (c - o) / dt) for c, o in zip(cur, old[1])]
+        if running and now - self._whist_t >= WORKER_SAMPLE:
+            self._whist_t = now
+            for h, r in zip(self._whist, rates):
+                h.append(r)
+        out = []
+        for i, w in enumerate(self.winfo):
+            c = WorkerInfo(**{k: v for k, v in vars(w).items() if k != "hist"})
+            c.rate = rates[i] if running else 0.0
+            c.hist = list(self._whist[i]) if i < len(self._whist) else []
+            out.append(c)
+        return out
+
     def snapshot(self):
         now = time.time()
         with self.lock:
@@ -601,7 +635,7 @@ class Job:
                 compression=self.compression if self.state != J_PLANNING else "…",
                 compressed_logical=self.net_logical, compressed_wire=self.wire_bytes,
                 errors=list(self.errors[-50:]), notes=list(self.log[-20:]),
-                workers=[WorkerInfo(**vars(i)) for i in self.winfo],
+                workers=self._worker_stats(now),
             )
 
 
@@ -678,6 +712,7 @@ class Worker:
                 # Progress is counted once: on the remote leg of the transfer.
                 def prog(k):
                     info.moved += k
+                    info.bytes += k
                     job.block_progress(w, k)
                 rprog = prog if not src_local else None
                 wprog = prog if src_local and not dst_local else None
@@ -689,6 +724,8 @@ class Worker:
                     f.partial, i * f.bs, data, sha, job.codec, job.level, progress=wprog)
                 wire = (0 if src_local else win) + (0 if dst_local else wout)
                 legs = (0 if src_local else 1) + (0 if dst_local else 1)
+                if not rprog and not wprog:
+                    info.bytes += n    # local->local: no in-flight progress, count on completion
                 job.done_block(w, wire, n * legs)
             elif w.kind == "finalize":
                 info.desc = f"finalize {f.rel}"

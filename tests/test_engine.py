@@ -253,3 +253,41 @@ def test_agent_source_is_py27_compatible():
     r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert all(b < 128 for b in open(a.__file__, "rb").read()), "agent must be ASCII"
+
+
+def test_per_stream_throughput(tmp_path):
+    """Each stream reports a rate and a history for the sparklines."""
+    if not PY38:
+        pytest.skip("needs a subprocess agent")
+    import time as _t
+    bs = 64 * 1024
+    src = tmp_path / "a" / "f.bin"
+    mkfile(str(src), bs * 60, 4)
+    orig = SshSession.call
+
+    def slow(self, req, payload=b"", progress=None):
+        if req.get("op") == "write":
+            _t.sleep(0.05)
+        return orig(self, req, payload, progress)
+
+    SshSession.call = slow
+    try:
+        j = engine.Job(LocalEndpoint(), [str(src)], FakeRemote(PY38), str(tmp_path / "b"),
+                       engine.Options(block_size=bs, workers=3))
+        j.start()
+        seen_rate = False
+        for _ in range(60):
+            _t.sleep(0.25)
+            s = j.snapshot()
+            if any(w.rate > 0 for w in s.workers):
+                seen_rate = True
+            if s.state == engine.J_DONE:
+                break
+    finally:
+        SshSession.call = orig
+    assert seen_rate
+    s = j.snapshot()
+    assert len(s.workers) == 3
+    assert all(w.bytes > 0 for w in s.workers)
+    assert sum(w.bytes for w in s.workers) >= bs * 60
+    assert any(len(w.hist) >= 2 for w in s.workers)

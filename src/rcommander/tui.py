@@ -463,6 +463,7 @@ class TransfersScreen(Screen):
         w = self.query_one("#workers", DataTable)
         w.add_column("#", width=3)
         w.add_column("block", key="bar", width=22)
+        w.add_column("throughput", key="spark", width=30)
         w.add_column("activity", key="desc")
         f = self.query_one("#files", DataTable)
         for name, key, width in (("File", "file", None), ("Size", "size", 10),
@@ -561,7 +562,9 @@ class TransfersScreen(Screen):
         if w.row_count != len(s.workers):
             w.clear()
             for info in s.workers:
-                w.add_row(str(info.idx + 1), "", "", key=str(info.idx))
+                w.add_row(str(info.idx + 1), "", "", "", key=str(info.idx))
+        vmax = max([max(i.hist, default=0) for i in s.workers] + [i.rate for i in s.workers]
+                   + [1.0])
         for info in s.workers:
             b = ""
             if info.state == "busy" and info.block >= 0 and info.total:
@@ -571,6 +574,9 @@ class TransfersScreen(Screen):
             style = "red" if info.state == "reconnecting" else (
                 "grey50" if info.state in ("idle", "stopped") else "")
             w.update_cell(str(info.idx), "bar", b)
+            sp = graph(info.hist, 18, 1, "speed", vmax=vmax)
+            sp.append(f" {fmt_bytes(info.rate):>9}/s")
+            w.update_cell(str(info.idx), "spark", sp)
             w.update_cell(str(info.idx), "desc", Text(info.desc, style=style))
 
         ft = self.query_one("#files", DataTable)
@@ -858,8 +864,12 @@ class Commander(App):
         sg.update(graph(rate_history(j), max(10, sg.size.width), 3))
 
     async def action_quit(self):
-        running = [j for j in self.queue.jobs if j.t_start and j.state in
+        running = [j for j in self.queue.jobs if j.t_start and not j.cancelled and j.state in
                    (engine.J_RUNNING, engine.J_PAUSED, engine.J_PLANNING)]
+        if running and os.environ.get("RC_NO_CONFIRM", "") not in ("", "0"):
+            for j in running:
+                j.cancel()
+            running = []
         if not running:
             self.exit()
             return

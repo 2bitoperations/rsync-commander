@@ -1,7 +1,8 @@
 """Transfer queue and the detailed live view of a job."""
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QObject, QPointF, QRectF, Qt,
+                            QTimer, Signal)
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QProgressBar, QPushButton,
                                QScrollArea, QSplitter, QStyle, QStyledItemDelegate,
@@ -99,6 +100,60 @@ class ProgressDelegate(QStyledItemDelegate):
             painter.drawText(r.translated(1, 1), Qt.AlignCenter, text)
             painter.setPen(QColor("white"))
             painter.drawText(r, Qt.AlignCenter, text)
+        painter.restore()
+
+
+class SparkDelegate(QStyledItemDelegate):
+    """Per-stream throughput sparkline. Item data (Qt.UserRole):
+    {"hist": [bytes/s, ...] oldest first, "rate": bytes/s, "vmax": shared scale}.
+    The newest sample is at the right edge, and all streams share one scale so
+    they can be compared directly."""
+
+    WINDOW = 60       # samples shown (x WORKER_SAMPLE = 30 s)
+    MIN_POINTS = 20   # don't stretch fewer samples than this across the width
+    LINE = QColor("#a78bfa")
+    FILL_TOP = QColor(167, 139, 250, 150)
+    FILL_BOTTOM = QColor(167, 139, 250, 25)
+
+    def paint(self, painter, option, index):
+        v = index.data(Qt.UserRole)
+        if not v:
+            return super().paint(painter, option, index)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        cell = QRectF(option.rect).adjusted(4, 3, -4, -3)
+        text = f"{fmt_bytes(v['rate'])}/s"
+        f = painter.font()
+        f.setPointSizeF(max(8.0, f.pointSizeF() * 0.9))
+        painter.setFont(f)
+        tw = painter.fontMetrics().horizontalAdvance("999.9 MiB/s") + 8
+        r = cell.adjusted(0, 0, -tw, 0)                 # graph area; label to its right
+        painter.fillRect(r, QColor(255, 255, 255, 12))
+        hist, vmax = v["hist"][-self.WINDOW:], v["vmax"] or 1.0
+        if len(hist) >= 2:
+            # fill the width once there are MIN_POINTS samples, then scroll
+            step = r.width() / (max(len(hist), self.MIN_POINTS) - 1)
+            x0 = r.right() - step * (len(hist) - 1)
+            pts = [QPointF(x0 + i * step, r.bottom() - min(1.0, h / vmax) * r.height())
+                   for i, h in enumerate(hist)]
+            area = QPainterPath(QPointF(pts[0].x(), r.bottom()))
+            for p in pts:
+                area.lineTo(p)
+            area.lineTo(QPointF(pts[-1].x(), r.bottom()))
+            area.closeSubpath()
+            g = QLinearGradient(0, r.top(), 0, r.bottom())
+            g.setColorAt(0, self.FILL_TOP)
+            g.setColorAt(1, self.FILL_BOTTOM)
+            painter.fillPath(area, g)
+            line = QPainterPath(pts[0])
+            for p in pts[1:]:
+                line.lineTo(p)
+            painter.setPen(QPen(self.LINE, 1.5))
+            painter.drawPath(line)
+        painter.setPen(QColor("white"))
+        painter.drawText(cell, Qt.AlignRight | Qt.AlignVCenter, text)
         painter.restore()
 
 
@@ -248,14 +303,19 @@ class TransfersPane(QWidget):
         grid.setColumnStretch(3, 1)
 
         self.workers = QTreeWidget()
-        self.workers.setHeaderLabels(["Stream", "Activity", "Current block"])
+        self.workers.setHeaderLabels(["Stream", "Activity", "Current block", "Throughput"])
         self.workers.headerItem().setToolTip(
             2, "How much of the block this stream is moving has crossed the network")
+        self.workers.headerItem().setToolTip(
+            3, "This connection's throughput over the last 30 s (all streams share one scale)")
+        self.workers.setItemDelegateForColumn(3, SparkDelegate())
         self.workers.setRootIsDecorated(False)
         self.workers.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.workers.header().setStretchLastSection(False)
         self.workers.header().setSectionResizeMode(2, QHeaderView.Fixed)
         self.workers.setColumnWidth(2, 260)
+        self.workers.header().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.workers.setColumnWidth(3, 300)
         self.workers.setItemDelegateForColumn(2, ProgressDelegate())
 
         self.files_model = FilesModel()
@@ -435,7 +495,9 @@ class TransfersPane(QWidget):
     def _fill_workers(self, s):
         w = self.workers
         while w.topLevelItemCount() < len(s.workers):
-            w.addTopLevelItem(QTreeWidgetItem(["", "", ""]))
+            w.addTopLevelItem(QTreeWidgetItem(["", "", "", ""]))
+        vmax = max([max(i.hist, default=0) for i in s.workers] + [i.rate for i in s.workers]
+                   + [1.0])
         while w.topLevelItemCount() > len(s.workers):
             w.takeTopLevelItem(w.topLevelItemCount() - 1)
         for i, info in enumerate(s.workers):
@@ -453,6 +515,7 @@ class TransfersPane(QWidget):
             else:
                 it.setData(2, Qt.UserRole, None)
                 it.setText(2, "")
+            it.setData(3, Qt.UserRole, {"hist": info.hist, "rate": info.rate, "vmax": vmax})
             it.setForeground(1, QColor("#ef4444") if info.state == "reconnecting"
                              else QColor("#888") if info.state in ("idle", "stopped")
                              else QColor(self.palette().text().color()))

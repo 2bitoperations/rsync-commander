@@ -189,6 +189,9 @@ Put per-host notes in `HOSTS.local.md`. It is gitignored.
 
 ## Development
 
+Set `RC_NO_CONFIRM=1` to skip the "transfer running, really quit?" prompt under
+automation. The test suite sets it.
+
 ```sh
 uv run pytest
 ```

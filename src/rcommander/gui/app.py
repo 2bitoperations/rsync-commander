@@ -1,5 +1,6 @@
 """Main window: two panels on top, transfers below, NC-style function keys."""
 
+import os
 import posixpath
 import sys
 
@@ -8,7 +9,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-                               QSpinBox, QSplitter, QToolBar, QVBoxLayout, QWidget)
+                               QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
 from .. import engine
 from ..endpoint import LocalEndpoint, RemoteEndpoint, browse_call, ssh_config_hosts
@@ -257,8 +258,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev):
         running = [j for j in self.mgr.jobs if j.state in (engine.J_RUNNING, engine.J_PAUSED,
                                                              engine.J_PLANNING)
-                   and j.t_start is not None]
-        if running:
+                   and j.t_start is not None and not j.cancelled]
+        if running and confirm_quit():
             r = QMessageBox.question(self, "Quit", "A transfer is running. Cancel it and quit?\n"
                                      "(It can be resumed later: partial files are kept.)")
             if r != QMessageBox.Yes:
@@ -273,6 +274,12 @@ class MainWindow(QMainWindow):
 
 
 APP_NAME = "rsync-commander"
+
+
+def confirm_quit():
+    """Ask before quitting with transfers running, except under automation
+    (RC_NO_CONFIRM=1), where a modal dialog would just hang the run."""
+    return os.environ.get("RC_NO_CONFIRM", "") in ("", "0")
 
 
 def run():
