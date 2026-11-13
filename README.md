@@ -180,6 +180,12 @@ Put per-host notes in `HOSTS.local.md`. It is gitignored.
 
 ## Known limits / next steps
 
+- **Real installer**: a self-contained, signed .app/.dmg for macOS and an AppImage or
+  package for Linux, so it doesn't depend on a uv checkout. For now
+  `rsync-commander install-app` makes a launcher that runs the checkout.
+- GUI and TUI need working ssh keys. Only `copy` and `batch` do the
+  ask-once password flow.
+
 - Upload progress within a block counts bytes handed to ssh. That runs ahead of the
   real network by up to ssh's buffer (a few MB); download progress is exact.
 - Diffing uses fixed-size blocks (no rolling hash). That suits FITS/RAW files,
