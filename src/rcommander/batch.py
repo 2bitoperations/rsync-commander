@@ -19,6 +19,7 @@ Profile reference (see examples/observatory.toml for a full one):
     server_side = true       # same box: copy on the box itself
     forward_agent = false    # let the source box use your ssh agent (opt-in)
     inplace = false          # update existing files in place, no temp copy (opt-in)
+    max_outage_min = 60      # host unreachable: keep reconnecting this long (0 = forever)
 
     [[hook]]                 # shell commands, in order
     run = "dpkg-query -l > \"$RC_STAGE/reports/packages.txt\""
@@ -109,7 +110,7 @@ class Profile:
         o = dict(self.data.get("options", {}))
         o.update(self.overrides)
         known = {"workers", "block_size_mib", "checksum", "compression", "level",
-                 "direct", "server_side", "forward_agent", "inplace"}
+                 "direct", "server_side", "forward_agent", "inplace", "max_outage_min"}
         unknown = set(o) - known
         if unknown:
             raise ProfileError(f"unknown option(s): {', '.join(sorted(unknown))}")
@@ -123,7 +124,8 @@ class Profile:
                               direct=bool(o.get("direct", True)),
                               server_side=bool(o.get("server_side", True)),
                               forward_agent=bool(o.get("forward_agent", False)),
-                              inplace=bool(o.get("inplace", False)))
+                              inplace=bool(o.get("inplace", False)),
+                              max_outage=float(o.get("max_outage_min", 60)) * 60)
 
     def dest(self):
         d = self.t(self.data["dest"])

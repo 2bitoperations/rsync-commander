@@ -24,8 +24,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .endpoint import ConnectionLost, RemoteError, peer_argv, same_box
-from .fmt import fmt_bytes as fmt_size
+from .endpoint import ConnectFailed, ConnectionLost, RemoteError, peer_argv, same_box
+from .fmt import fmt_bytes as fmt_size, fmt_dur
 
 # Block states (stored in a bytearray per file for cheap painting).
 B_UNKNOWN, B_PENDING, B_HASHING, B_SAME, B_ACTIVE, B_DONE, B_FAILED = range(7)
@@ -68,7 +68,11 @@ class Options:
     compression: str = "zstd"  # none | gzip | zstd  (wire only; remote legs)
     level: int = 0             # 0 = codec default (gzip 1, zstd 3)
     hash_batch: int = 16       # blocks per hash request
-    max_retries: int = 6
+    max_retries: int = 6       # per op: connection dropped while doing it
+    # Host unreachable (network change, wifi off, box asleep): keep trying to
+    # reconnect this long before giving up on the job (0 = forever). Outages
+    # don't count against max_retries. A rerun resumes where this left off.
+    max_outage: float = 3600
     # Files up to small_file_max (and one block) go in batches: one round trip
     # per batch per step instead of 3-4 per file.
     small_file_max: int = 1 << 20
@@ -267,6 +271,8 @@ class Job:
         self.errors = []          # (rel, message)
         self.log = []
         self.cancelled = False
+        self.gave_up = False      # cancelled by the engine: host unreachable too long
+        self._down_since = {}     # endpoint -> first failed connect of its outage
         self.paused = False
         self.t_start = None
         self.t_end = None
@@ -325,6 +331,31 @@ class Job:
         for w in self.workers:
             w.abort()
 
+    def host_down(self, ep, ex):
+        """A worker couldn't connect to ep. Returns how long it's been down, or
+        None if that's now past max_outage and the job has been given up."""
+        now = time.time()
+        with self.lock:
+            if ep not in self._down_since:
+                self._down_since[ep] = now
+                self.log.append(f"connection lost ({ex}); reconnecting")
+            down = now - self._down_since[ep]
+            limit = self.opts.max_outage
+            if not limit or down <= limit or self.cancelled:
+                return down
+            if not self.gave_up:
+                self.gave_up = True
+                self.errors.append(("(connection)", f"gave up after {fmt_dur(down)} "
+                                    f"unreachable: {ex}. Run again to resume."))
+        self.cancel()
+        return None
+
+    def host_up(self, ep):
+        with self.lock:
+            t = self._down_since.pop(ep, None)
+            if t is not None:
+                self.log.append(f"reconnected to {ep.name} after {fmt_dur(time.time() - t)}")
+
     def set_paused(self, paused):
         with self.lock:
             self.paused = paused
@@ -370,7 +401,9 @@ class Job:
             self.src_ep.forward_agent = False
         with self.lock:
             self.t_end = time.time()
-            if self.cancelled:
+            if self.gave_up:
+                self.state = J_FAILED
+            elif self.cancelled:
                 self.state = J_CANCELLED
             elif self._agg[F_FAILED] or self.errors:
                 self.state = J_FAILED
@@ -875,12 +908,20 @@ class Worker:
         self.dst = None
         self._sessions = []
         self._lock = threading.Lock()
+        self.conn_fails = 0   # consecutive failed connects (outage backoff)
 
     def _sess(self, which):
         ep = self.job.src_ep if which == "src" else self.job.dst_ep
         cur = getattr(self, which)
         if cur is None:
-            cur = ep.session()
+            try:
+                cur = ep.session()
+            except ConnectFailed as ex:
+                ex.ep = ep
+                raise
+            self.conn_fails = 0
+            if ep in self.job._down_since:
+                self.job.host_up(ep)
             with self._lock:
                 self._sessions.append(cur)
             setattr(self, which, cur)
@@ -896,6 +937,11 @@ class Worker:
 
     def abort(self):
         self._drop_sessions()
+
+    def _sleep(self, secs):
+        end = time.time() + secs
+        while time.time() < end and not self.job.cancelled:
+            time.sleep(0.2)
 
     def run(self):
         job, info = self.job, self.info
@@ -1074,6 +1120,18 @@ class Worker:
                 else:
                     d.finalize(f.partial, f.dst_path, f.size, f.mtime_ns, f.mode)
                 job.done_finalize(w)
+        except ConnectFailed as ex:
+            # Couldn't even connect: the host/network is down, not this op.
+            # Put the work back untouched and wait for the host to return.
+            self._drop_sessions()
+            (job.requeue_batch if w.kind in ("batch", "server") else job.requeue)(w)
+            down = job.host_down(getattr(ex, "ep", None), ex)
+            if down is None or job.cancelled:
+                return
+            self.conn_fails += 1
+            info.state = "reconnecting"
+            info.desc = f"host unreachable for {fmt_dur(down)}, retrying ({ex})"
+            self._sleep(min(30, 2 ** self.conn_fails))
         except ConnectionLost as ex:
             self._drop_sessions()
             w.tries += 1
@@ -1088,10 +1146,7 @@ class Worker:
             (job.requeue_batch if batch else job.requeue)(w)
             info.state = "reconnecting"
             info.desc = f"reconnecting ({ex})"
-            delay = min(30, 2 ** w.tries)
-            end = time.time() + delay
-            while time.time() < end and not job.cancelled:
-                time.sleep(0.2)
+            self._sleep(min(30, 2 ** w.tries))
         except RemoteError as ex:
             job.fail_batch(w, str(ex)) if w.files else job.failed(w, str(ex))
         except Exception as ex:  # bug or unexpected: fail the file(s), keep going

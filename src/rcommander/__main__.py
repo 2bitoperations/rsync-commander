@@ -43,7 +43,8 @@ def cmd_copy(a):
     opts = engine.Options(block_size=a.block_size << 20, workers=a.workers,
                           checksum=not a.quick, compression=a.compress, level=a.level,
                           direct=not a.no_direct, server_side=not a.no_server_side,
-                          forward_agent=a.forward_agent, inplace=a.inplace)
+                          forward_agent=a.forward_agent, inplace=a.inplace,
+                          max_outage=a.max_outage * 60)
     from .sshauth import AuthError, ensure_auth
     masters = []
     try:
@@ -120,6 +121,9 @@ def main(argv=None):
                    help="update existing files in place instead of via a temp copy "
                         "(no full copy of the old file on disks that can't clone; "
                         "the file is part old, part new until done)")
+    c.add_argument("--max-outage", type=float, default=60, metavar="MIN",
+                   help="if a host becomes unreachable, keep trying to reconnect "
+                        "for this many minutes before giving up (default 60; 0 = forever)")
     c.add_argument("-v", "--verbose", action="store_true")
     c.add_argument("--ssh-mux", choices=("auto", "always", "never"), default="auto",
                    help="auth once per host (see `batch --help`)")

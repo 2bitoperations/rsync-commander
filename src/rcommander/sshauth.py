@@ -33,10 +33,13 @@ def _base(ep):
 
 
 def key_auth_works(ep):
-    r = subprocess.run(_base(ep) + ["-o", "BatchMode=yes", "-o", "ControlMaster=no",
-                                    "-o", "ControlPath=none", ep.host, "true"],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.PIPE, text=True)
+    try:
+        r = subprocess.run(_base(ep) + ["-o", "BatchMode=yes", "-o", "ControlMaster=no",
+                                        "-o", "ControlPath=none", ep.host, "true"],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, timeout=60)
+    except subprocess.TimeoutExpired:   # e.g. stuck resolving a .local name
+        raise AuthError(f"ssh {ep.host}: no answer within 60s (host unreachable?)") from None
     return r.returncode == 0, r.stderr.strip()
 
 
@@ -57,8 +60,8 @@ class SshMaster:
         ssh prompt goes to prompter(prompt, kind) through an askpass relay."""
         argv = _base(self.ep) + [
             "-M", "-N", "-f", "-o", "ControlMaster=yes", "-o", f"ControlPath={self.path}",
-            "-o", "ControlPersist=no", "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=4", self.ep.host]
+            "-o", "ControlPersist=no", "-o", "ServerAliveInterval=10",
+            "-o", "ServerAliveCountMax=3", self.ep.host]
         relay = None
         if prompter is None:
             r = subprocess.run(argv)                    # the single terminal prompt

@@ -62,6 +62,12 @@ class ConnectionLost(Exception):
     """The channel died; the op may be retried on a fresh session."""
 
 
+class ConnectFailed(ConnectionLost):
+    """Could not open a session at all (host unreachable, name lookup hung,
+    ssh gave up connecting). Says nothing about the op being attempted: the
+    engine waits the outage out instead of charging it to a file's retries."""
+
+
 def _check(resp):
     if not resp.get("ok"):
         if resp.get("errno") == _agent.PEER_LOST:   # box-to-box leg died: retryable
@@ -242,20 +248,47 @@ class LocalSession(Session):
 class SshSession(Session):
     wire_compress = True
 
+    # ssh's ConnectTimeout only covers the TCP connect: a name lookup (mDNS
+    # .local names after a network change) or a stalled handshake can hang
+    # ssh forever. Kill it if the agent hasn't said hello by then.
+    HANDSHAKE_TIMEOUT = 45
+
     def __init__(self, ep):
         self.ep = ep
         self._lock = threading.Lock()
         self.proc = subprocess.Popen(ep.agent_argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, bufsize=0)
+        timed_out = threading.Event()
+
+        def expire():
+            if self.proc.poll() is None:
+                timed_out.set()
+                self.proc.kill()
+        timer = threading.Timer(self.HANDSHAKE_TIMEOUT, expire)
+        timer.daemon = True
+        timer.start()
         try:
             self.proc.stdin.write(AGENT_SRC)
             self.proc.stdin.flush()
             hello, _ = _agent.read_frame(self.proc.stdout)
         except (EOFError, OSError, ValueError) as ex:
+            timer.cancel()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             err = self._stderr_tail()
             self.close()
-            raise ConnectionLost(f"ssh {ep.host}: could not start agent: {err or ex}") from None
+            if timed_out.is_set():
+                raise ConnectFailed(f"ssh {ep.host}: no answer within "
+                                    f"{self.HANDSHAKE_TIMEOUT}s (host unreachable?)") from None
+            msg = f"ssh {ep.host}: could not start agent: {err or ex}"
+            # 255 = ssh itself failed (resolve/connect/auth); anything else came
+            # from the remote side (no python, agent crashed) and won't heal.
+            raise (ConnectFailed if self.proc.returncode == 255 else ConnectionLost)(msg) from None
+        timer.cancel()
         if not hello.get("ready"):
+            self.close()
             raise ConnectionLost(f"ssh {ep.host}: bad agent greeting {hello!r}")
         self.python = hello.get("python")
         # v1 agents predate codec negotiation but always had zlib
@@ -317,6 +350,7 @@ class SshSession(Session):
                 p.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait()
 
 
 class Endpoint:
@@ -384,7 +418,10 @@ class RemoteEndpoint(Endpoint):
     def ssh_argv(self):
         return ["ssh", "-T", "-x", "-e", "none",
                 "-o", "BatchMode=yes",
-                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+                # A dead link (interface gone, peer asleep) is noticed in ~30 s
+                # and ssh exits, rather than a read blocking for minutes.
+                "-o", "ConnectTimeout=15",
+                "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                 # Default: one TCP stream per session (no multiplexing). With a
                 # control_path (see sshauth.SshMaster) every session rides one
                 # already-authenticated master connection instead.
@@ -455,7 +492,7 @@ def peer_argv(dst_ep):
             return None, f"{dst_ep.host} is reached via {k}, which the source box can't reuse"
     argv = ["ssh", "-T", "-x", "-e", "none", "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+            "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
             "-p", cfg.get("port", "22"), "-l", cfg.get("user", ""),
             cfg.get("hostname", dst_ep.host), remote_agent_command(dst_ep.python)]
     return argv, None

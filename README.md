@@ -231,7 +231,15 @@ That's 3–4 round trips per batch instead of per file. 200 log-sized files to a
 N worker threads each own one ssh connection per remote endpoint. That gives
 N independent TCP streams, which matters on high-latency links (see below).
 Dropped connections are retried with backoff on a fresh session, and work
-already done is kept.
+already done is kept. A dead link (wifi switched off, interface gone, box
+asleep) is noticed within about 30 s via ssh keepalives. If the host then can't
+be reached at all, the job waits for it: the streams keep trying to reconnect
+(every 30 s at most) and the transfer carries on when the host is back. These
+failed connects don't count against a file's retries, and a connect that hangs
+(e.g. ssh stuck resolving a `.local` name after a network change) is killed
+after 45 s. After `--max-outage` minutes (default 60, `0` = wait forever;
+`max_outage_min` in a profile) the job stops with an error and keeps its
+partial files, so running it again resumes.
 
 Not copied: `@eaDir` (Synology thumbnails), `#recycle`, `#snapshot`, `.DS_Store`,
 and symlinks (listed in the job log).
