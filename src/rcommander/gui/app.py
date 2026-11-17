@@ -5,7 +5,7 @@ import posixpath
 import sys
 import threading
 
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QLoggingCategory, QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
@@ -349,6 +349,12 @@ def run():
     from . import macos
     from .icon import app_icon
     macos.set_bundle_name(APP_NAME)          # menu bar title (must precede QApplication)
+    # The macOS accessibility bridge caches table row counts and, when an AX
+    # client (VoiceOver, window managers, automation tools) asks before its
+    # cache catches up, logs "Cell requested for row N is out of bounds ...
+    # Resizing table model" and refreshes itself. Harmless; QT_LOGGING_RULES
+    # can turn it back on.
+    QLoggingCategory.setFilterRules("qt.accessibility.table.warning=false")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setOrganizationName("2bitoperations")
     app.setApplicationName(APP_NAME)
