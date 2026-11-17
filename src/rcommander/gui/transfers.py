@@ -5,7 +5,7 @@ from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QObject, QPointF, 
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QProgressBar, QPushButton,
-                               QScrollArea, QSplitter, QStyle, QStyledItemDelegate,
+                               QSplitter, QStyle, QStyledItemDelegate,
                                QTableView, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView)
 
@@ -343,11 +343,8 @@ class TransfersPane(QWidget):
         self.follow = QCheckBox("follow active file")
         self.follow.setChecked(True)
         self.map_label = QLabel()
-        self.blockmap = BlockMap()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.blockmap)
-        scroll.setMinimumHeight(60)
+        self.blockmap = BlockMap()   # scales to fit: no scrolling
+        self.blockmap.setMinimumHeight(60)
         self.errors = QLabel()
         self.errors.setStyleSheet("color: #ef4444;")
         self.errors.setWordWrap(True)
@@ -360,7 +357,7 @@ class TransfersPane(QWidget):
         ml = QVBoxLayout(mapbox)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.addLayout(maphead)
-        ml.addWidget(scroll, 1)
+        ml.addWidget(self.blockmap, 1)
         ml.addWidget(legend_widget())
 
         lower = QSplitter(Qt.Vertical)
@@ -556,5 +553,7 @@ class TransfersPane(QWidget):
         with j.lock:
             blocks, prog = bytes(f.blocks), dict(f.block_progress)
         self.blockmap.set_data(blocks, prog, f.bs, f.size)
+        per = self.blockmap.per
         self.map_label.setText(f"{f.rel} — {f.nblocks} blocks × {fmt_bytes(f.bs)}"
-                               f" — {engine.F_NAMES[f.state]}")
+                               + (f" ({per} per cell)" if per > 1 else "")
+                               + f" — {engine.F_NAMES[f.state]}")
