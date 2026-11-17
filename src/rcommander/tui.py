@@ -489,13 +489,21 @@ class TransfersScreen(Screen):
         self.idx = max(0, len(queue.jobs) - 1)
         self.file = None
         self.follow = True
-        self._rows = {}
+        self._rows = {}        # row key (file idx) -> last drawn signature
+        self._lo = self._hi = 0  # the table shows j.files[_lo:_hi]
+
+    # A job can hold millions of files; DataTable can't (adding 100k rows takes
+    # seconds and ~1.6 KB each), so the table is a window of at most FILES_WINDOW
+    # rows. Following, it tracks the active file; browsing, it re-centres when
+    # the cursor reaches either edge.
+    FILES_WINDOW = 400
 
     def compose(self):
         with Horizontal(id="top"):
             yield Static(id="summary")
             yield Static(id="speedgraph")
         yield DataTable(id="workers", cursor_type="none")
+        yield Static(id="fileshead")
         yield DataTable(id="files", cursor_type="row", zebra_stripes=True)
         yield Static(id="maphead")
         yield Static(id="map")
@@ -531,6 +539,7 @@ class TransfersScreen(Screen):
 
     def _reset(self):
         self._rows = {}
+        self._lo = self._hi = 0
         self.file = None
         self.follow = True
         self.query_one("#files", DataTable).clear()
@@ -552,10 +561,61 @@ class TransfersScreen(Screen):
     def pick(self, ev):
         j = self.job
         if j and ev.row_key is not None and self.screen.focused is ev.data_table:
-            f = j.by_id.get(int(ev.row_key.value))
+            i = int(ev.row_key.value)
+            f = j.files[i] if 0 <= i < len(j.files) else None
             if f is not None and f is not self.file:
                 self.file = f
                 self.follow = False
+
+    def _window_start(self, j, ft, n):
+        W = self.FILES_WINDOW
+        if n <= W:
+            return 0
+        clamp = lambda i: max(0, min(n - W, i))   # noqa: E731
+        if self.follow:
+            with j.lock:
+                act = [x.idx for x in j.active if x.state == engine.F_WORKING]
+            target = act[0] if act else min(j.next_idx, n - 1)
+            if self._lo + 5 <= target < self._lo + W - 50 and self._hi > self._lo:
+                return self._lo
+            return clamp(target - 20)
+        r, f = ft.cursor_row, self.file
+        if f is not None and f.idx >= 0 and (
+                (r <= 1 and self._lo > 0) or (r >= ft.row_count - 2 and self._hi < n)):
+            return clamp(f.idx - W // 2)
+        return self._lo
+
+    def _fill_files(self, j):
+        ft = self.query_one("#files", DataTable)
+        files, n = j.files, len(j.files)
+        lo = self._window_start(j, ft, n)
+        hi = min(n, lo + self.FILES_WINDOW)
+        with ft.prevent(DataTable.RowHighlighted):   # not the user picking a row
+            if lo != self._lo:
+                ft.clear()
+                self._rows, self._hi = {}, lo
+            for i in range(self._hi, hi):            # new rows (window moved or grew)
+                f = files[i]
+                ft.add_row(f.rel, fmt_bytes(f.size), "", "", "", "", key=str(i))
+            if lo != self._lo and self.file is not None and lo <= self.file.idx < hi:
+                ft.move_cursor(row=self.file.idx - lo)
+        self._lo, self._hi = lo, hi
+        for i in range(lo, hi):
+            f = files[i]
+            sig = (f.state, int(f.progress * 1000), f.bytes_same, f.bytes_done,
+                   int(sum(f.block_progress.values())) >> 16)
+            if self._rows.get(i) == sig:
+                continue
+            self._rows[i] = sig
+            cells = (Text(engine.F_NAMES[f.state], style=FILE_STYLE.get(f.state, "")),
+                     file_meter(f), fmt_bytes(f.bytes_same), fmt_bytes(f.bytes_done))
+            for col, val in zip(("state", "prog", "same", "sent"), cells):
+                ft.update_cell(str(i), col, val)
+        head = f"files {lo + 1:,}–{hi:,} of {n:,}" if n > self.FILES_WINDOW else f"{n:,} files"
+        if n > self.FILES_WINDOW:
+            head += ("   (window follows the active file)" if self.follow
+                     else "   (window scrolls at its edges; f: follow active)")
+        self.query_one("#fileshead", Static).update(Text(head, style="grey70"))
 
     def tick(self):
         j = self.job
@@ -622,20 +682,7 @@ class TransfersScreen(Screen):
             w.update_cell(str(info.idx), "spark", sp)
             w.update_cell(str(info.idx), "desc", Text(info.desc, style=style))
 
-        ft = self.query_one("#files", DataTable)
-        for f in j.files:
-            key = str(f.id)
-            sig = (f.state, int(f.progress * 1000), f.bytes_same, f.bytes_done,
-                   int(sum(f.block_progress.values())) >> 16)
-            cells = (Text(engine.F_NAMES[f.state], style=FILE_STYLE.get(f.state, "")),
-                     file_meter(f),
-                     fmt_bytes(f.bytes_same), fmt_bytes(f.bytes_done))
-            if key not in self._rows:
-                ft.add_row(f.rel, fmt_bytes(f.size), *cells, key=key)
-            elif self._rows[key] != sig:
-                for col, val in zip(("state", "prog", "same", "sent"), cells):
-                    ft.update_cell(key, col, val)
-            self._rows[key] = sig
+        self._fill_files(j)
 
         f = self.file
         if self.follow:
@@ -687,6 +734,7 @@ class Commander(App):
     TransfersScreen #summary { width: 1fr; height: auto; padding: 0 1; }
     TransfersScreen #speedgraph { width: 48; height: 6; padding: 0 1; border-left: vkey $panel-lighten-2; }
     TransfersScreen #workers { height: auto; max-height: 10; }
+    TransfersScreen #fileshead { height: 1; padding: 0 1; }
     TransfersScreen #files { height: 1fr; }
     TransfersScreen #maphead { height: 1; padding: 0 1; }
     TransfersScreen #map { height: auto; max-height: 12; padding: 0 1; }

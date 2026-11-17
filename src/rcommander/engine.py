@@ -82,14 +82,29 @@ class Options:
     forward_agent: bool = False
 
 
-class FileTask:
-    _ids = itertools.count()
+_NOTHING = ()   # stands in for a file's work queues until it is prepared
 
-    def __init__(self, rel, src_path, dst_path, size, mtime_ns, mode, bs):
+
+class FileTask:
+    """One file of a job. A job can hold millions of these, so they are kept
+    small: __slots__, paths stored as shared base + rel, and the work queues
+    only created once the file is prepared."""
+    _ids = itertools.count()
+    __slots__ = ("id", "idx", "rel", "_src_base", "_src_rel", "_dst_base", "_dst_rel", "size",
+                 "mtime_ns", "mode", "bs", "nblocks", "blocks", "block_progress", "state",
+                 "error", "basis", "basis_size", "partial", "need_clone", "cloned",
+                 "cloning", "hash_queue", "hash_results", "pending", "remaining",
+                 "inflight", "bytes_needed", "bytes_done", "bytes_same", "hash_total",
+                 "hash_done", "started_at", "finished_at", "folded")
+
+    def __init__(self, rel, src_path, dst_path, size, mtime_ns, mode, bs, idx=-1):
+        """src_path / dst_path: a full path, or (base, rel) to share the base
+        string between files (the planner does this)."""
         self.id = next(self._ids)
+        self.idx = idx                                 # position in job.files
         self.rel = rel
-        self.src_path = src_path
-        self.dst_path = dst_path
+        self._src_base, self._src_rel = self._split(src_path, rel)
+        self._dst_base, self._dst_rel = self._split(dst_path, rel)
         self.size = size
         self.mtime_ns = mtime_ns
         self.mode = mode
@@ -105,9 +120,9 @@ class FileTask:
         self.need_clone = False
         self.cloned = False
         self.cloning = False
-        self.hash_queue = collections.deque()          # (side, start, count)
-        self.hash_results = {}                         # start -> {side: hashes}
-        self.pending = collections.deque()             # block indices to send
+        self.hash_queue = _NOTHING                     # deque of (side, start, count)
+        self.hash_results = None                       # start -> {side: hashes}
+        self.pending = _NOTHING                        # deque of block indices to send
         self.remaining = self.nblocks                  # blocks not SAME/DONE
         self.inflight = 0
         self.bytes_needed = 0                          # bytes that must be sent
@@ -117,6 +132,30 @@ class FileTask:
         self.hash_done = 0                             # hashed bytes, both sides /2
         self.started_at = None
         self.finished_at = None
+        self.folded = False                            # counted in the job's totals
+
+    @staticmethod
+    def _split(path, rel):
+        base, r = path if isinstance(path, tuple) else (None, path)
+        return base, (None if r == rel else r)       # equal to rel: keep one string
+
+    @staticmethod
+    def _join(base, r, rel):
+        r = rel if r is None else r
+        return r if base is None else posixpath.join(base, r)
+
+    @property
+    def src_path(self):
+        return self._join(self._src_base, self._src_rel, self.rel)
+
+    @property
+    def dst_path(self):
+        return self._join(self._dst_base, self._dst_rel, self.rel)
+
+    def make_queues(self):
+        if self.hash_results is None:
+            self.hash_queue, self.pending, self.hash_results = (
+                collections.deque(), collections.deque(), {})
 
     def blen(self, i):
         return min(self.bs, self.size - i * self.bs)
@@ -151,7 +190,7 @@ WORKER_SAMPLE = 0.5    # seconds between samples
 class WorkerInfo:
     idx: int
     desc: str = "idle"
-    file_id: int = -1
+    file_idx: int = -1        # index into job.files
     block: int = -1
     moved: int = 0
     total: int = 0
@@ -209,7 +248,6 @@ class Job:
         self.cv = threading.Condition(self.lock)
         self.state = J_PLANNING
         self.files = []
-        self.by_id = {}
         self.active = []
         self.next_idx = 0
         self.errors = []          # (rel, message)
@@ -240,6 +278,20 @@ class Job:
         self.batches_inflight = 0
         self.batch_moved = 0.0    # in-flight bytes of running batches
         self.filtered_out = 0
+        # Running per-file totals, so snapshot() costs O(files in flight)
+        # instead of O(all files). Files fall into three groups:
+        #   files[next_idx:]  not started: QUEUED, only their size counts
+        #   retired           terminal: folded into _agg once, by _retire()
+        #   _live             started, not yet retired
+        # The _sized/_seen cursors let snapshot() catch up with files appended
+        # by the planner and files the scheduler has started.
+        self._agg = {"needed": 0, "same": 0, "hash_total": 0,
+                     F_DONE: 0, F_SKIPPED: 0, F_FAILED: 0}
+        self._live = set()
+        self._size_all = 0          # sum of size over files[:_sized]
+        self._sized = 0
+        self._size_started = 0      # sum of size over files[:_seen]
+        self._seen = 0
 
     # -- lifecycle -----------------------------------------------------------
     def start(self):
@@ -306,7 +358,7 @@ class Job:
             self.t_end = time.time()
             if self.cancelled:
                 self.state = J_CANCELLED
-            elif any(f.state == F_FAILED for f in self.files) or self.errors:
+            elif self._agg[F_FAILED] or self.errors:
                 self.state = J_FAILED
             else:
                 self.state = J_DONE
@@ -347,12 +399,10 @@ class Job:
                     if e["type"] == "d":
                         dirs.append(posixpath.join(self.dst_dir, out_rel))
                     elif e["type"] == "f":
-                        ft = FileTask(out_rel, posixpath.join(base, rel),
-                                      posixpath.join(self.dst_dir, out_rel),
+                        ft = FileTask(out_rel, (base, rel), (self.dst_dir, out_rel),
                                       e["size"], e["mtime_ns"], e["mode"],
-                                      self.opts.block_size)
+                                      self.opts.block_size, idx=len(self.files))
                         self.files.append(ft)
-                        self.by_id[ft.id] = ft
                     elif e["type"] == "l":
                         self.log.append(f"skipped symlink {rel}")
                     elif e["type"] == "err":
@@ -522,6 +572,15 @@ class Job:
         f.finished_at = time.time()
         if error:
             self.errors.append((f.rel, error))
+        if not f.folded:
+            f.folded = True
+            self._live.discard(f)
+            a = self._agg
+            a[state] += 1
+            a["same"] += f.bytes_same
+            a["hash_total"] += f.hash_total
+            if state != F_SKIPPED:
+                a["needed"] += f.bytes_needed
         if f in self.active:
             self.active.remove(f)
         self.cv.notify_all()
@@ -592,6 +651,7 @@ class Job:
                 f.remaining = 0
                 self._retire(f, F_SKIPPED)
                 return
+            f.make_queues()
             cmp_bytes = min(f.size, f.basis_size) if f.basis else 0
             ncmp = (cmp_bytes + f.bs - 1) // f.bs
             f.hash_total = cmp_bytes
@@ -676,8 +736,9 @@ class Job:
                 f.blocks[w.start] = B_FAILED
                 f.block_progress.pop(w.start, None)
             if f.state not in F_TERMINAL:
-                f.pending.clear()
-                f.hash_queue.clear()
+                if f.hash_results is not None:   # queues exist once prepared
+                    f.pending.clear()
+                    f.hash_queue.clear()
                 self._retire(f, F_FAILED, f"{w.kind}: {msg}")
 
     def requeue(self, w):
@@ -745,26 +806,38 @@ class Job:
             if self.state in (J_DONE, J_FAILED, J_CANCELLED) and self.t_start:
                 dur = max(0.001, (self.t_end or now) - self.t_start)
                 rate, wire_rate = self.bytes_done / dur, self.wire_bytes / dur
-            needed = sum(f.bytes_needed for f in self.files if f.state != F_SKIPPED)
-            same = sum(f.bytes_same for f in self.files)
-            total = sum(f.size for f in self.files)
-            hash_total = sum(f.hash_total for f in self.files)
+            files, nf = self.files, len(self.files)
+            for f in files[self._sized:nf]:
+                self._size_all += f.size
+            self._sized = nf
+            started = min(self.next_idx, nf)
+            for f in files[self._seen:started]:
+                self._size_started += f.size
+                if not f.folded:
+                    self._live.add(f)
+            self._seen = max(self._seen, started)
+            a = self._agg
+            needed, same, hash_total = a["needed"], a["same"], a["hash_total"]
+            for f in self._live:
+                same += f.bytes_same
+                hash_total += f.hash_total
+                if f.state != F_SKIPPED:
+                    needed += f.bytes_needed
+            total = self._size_all
             unresolved = total - same - needed
             hashing = self.state in (J_PLANNING,) or unresolved > 0
             # Files not yet prepared are assumed to need everything.
-            for f in self.files:
-                if f.state == F_QUEUED:
-                    needed += f.size
+            needed += self._size_all - self._size_started
+            needed += sum(f.size for f in self._live if f.state == F_QUEUED)  # prepare retried
             left = max(0, needed - done)
             eta = 0 if left == 0 else (left / rate if rate > 1 else -1)
             if self.state in (J_DONE, J_FAILED, J_CANCELLED):
                 eta = 0
             end = self.t_end or now
-            counts = collections.Counter(f.state for f in self.files)
             return Snapshot(
                 state=self.state, title=self.title,
-                files_total=len(self.files), files_done=counts[F_DONE],
-                files_skipped=counts[F_SKIPPED], files_failed=counts[F_FAILED],
+                files_total=nf, files_done=a[F_DONE],
+                files_skipped=a[F_SKIPPED], files_failed=a[F_FAILED],
                 bytes_total=total, bytes_needed=needed, bytes_done=done,
                 bytes_same=same, hash_total=hash_total, hash_done=int(self.hash_done),
                 wire_bytes=self.wire_bytes, rate=rate, wire_rate=wire_rate,
@@ -917,7 +990,7 @@ class Worker:
 
     def _do(self, w):
         job, info = self.job, self.info
-        info.state, info.file_id, info.block, info.moved, info.total = "busy", w.f.id, -1, 0, 0
+        info.state, info.file_idx, info.block, info.moved, info.total = "busy", w.f.idx, -1, 0, 0
         info.label = ""
         info.t0 = time.time()
         f = w.f

@@ -291,3 +291,82 @@ def test_per_stream_throughput(tmp_path):
     assert all(w.bytes > 0 for w in s.workers)
     assert sum(w.bytes for w in s.workers) >= bs * 60
     assert any(len(w.hist) >= 2 for w in s.workers)
+
+
+def _naive(j):
+    """The O(all files) totals snapshot() used to compute; it must agree."""
+    with j.lock:
+        fs = list(j.files)
+        needed = sum(f.bytes_needed for f in fs if f.state != engine.F_SKIPPED)
+        needed += sum(f.size for f in fs if f.state == engine.F_QUEUED)
+        return dict(files_total=len(fs), bytes_total=sum(f.size for f in fs),
+                    bytes_same=sum(f.bytes_same for f in fs),
+                    hash_total=sum(f.hash_total for f in fs), bytes_needed=needed,
+                    files_done=sum(f.state == engine.F_DONE for f in fs),
+                    files_skipped=sum(f.state == engine.F_SKIPPED for f in fs),
+                    files_failed=sum(f.state == engine.F_FAILED for f in fs))
+
+
+def test_snapshot_totals_incremental(tmp_path):
+    """snapshot() keeps running totals instead of rescanning every file; check
+    them against a full scan, mid-transfer and at the end, on a mix of small
+    (batched), large (block), identical and changed files."""
+    import time as _t
+    bs = 64 * 1024
+    src, dst = tmp_path / "src" / "T", tmp_path / "dst"
+    for i in range(300):
+        mkfile(str(src / f"s{i:03}"), 100 + i, i)          # small: batched
+    for i in range(6):
+        mkfile(str(src / f"big{i}"), bs * 20 + i, 1000 + i)  # block path
+    run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst))
+    for i in range(0, 300, 7):                              # change some, keep the rest
+        mkfile(str(src / f"s{i:03}"), 100 + i, 5000 + i)
+    mkfile(str(src / "big2"), bs * 20 + 2, 9999)
+    opts = engine.Options(block_size=bs, workers=3, checksum=True)
+    j = engine.Job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst), opts)
+    import threading
+    j.lock = threading.RLock()            # so the test can hold it across both views
+    j.cv = threading.Condition(j.lock)
+    j.start()
+    checks = 0
+    while j.state not in (engine.J_DONE, engine.J_FAILED, engine.J_CANCELLED):
+        with j.lock:
+            s, n = j.snapshot(), _naive(j)
+        if j.state == engine.J_RUNNING:
+            for k, v in n.items():
+                assert getattr(s, k) == v, (k, getattr(s, k), v)
+            checks += 1
+        _t.sleep(0.001)
+    assert checks > 0
+    j.wait(60)
+    s, n = j.snapshot(), _naive(j)
+    assert s.state == engine.J_DONE, j.errors
+    for k, v in n.items():
+        assert getattr(s, k) == v, (k, getattr(s, k), v)
+    assert s.files_total == 306 and s.files_failed == 0
+
+
+def test_filetask_paths_compact():
+    """FileTask keeps (base, rel) instead of full path strings; the paths it
+    hands out must be the same either way, including a remapped source rel."""
+    f = engine.FileTask("T/a/b.fits", ("/src", "T/a/b.fits"), ("/dst", "T/a/b.fits"), 5, 0, 0o644, 4)
+    assert (f.src_path, f.dst_path) == ("/src/T/a/b.fits", "/dst/T/a/b.fits")
+    assert f._src_rel is None and f._dst_rel is None          # rel stored once
+    g = engine.FileTask("New/b.fits", ("/src", "Old/b.fits"), ("/dst", "New/b.fits"), 5, 0, 0o644, 4)
+    assert (g.src_path, g.dst_path) == ("/src/Old/b.fits", "/dst/New/b.fits")
+    h = engine.FileTask("b", "/x/y/b", "/d/b", 5, 0, 0o644, 4)    # full paths still work
+    assert (h.src_path, h.dst_path) == ("/x/y/b", "/d/b")
+    assert not hasattr(h, "__dict__")
+
+
+def test_copy_with_remapped_dest(tmp_path):
+    """Source.to renames the top dir; src and dst paths must still resolve."""
+    src = tmp_path / "src" / "M42"
+    for i in range(3):
+        mkfile(str(src / "sub" / f"f{i}"), 5000 + i, i)
+    mkfile(str(src / "big"), 64 * 1024 * 5, 9)
+    dst = tmp_path / "dst"
+    j, s = run_job(LocalEndpoint(), [engine.Source(str(src), to="Orion")], LocalEndpoint(), str(dst))
+    assert s.state == engine.J_DONE, j.errors
+    for rel in ("sub/f0", "sub/f1", "sub/f2", "big"):
+        assert sha(str(dst / "Orion" / rel)) == sha(str(src / rel))

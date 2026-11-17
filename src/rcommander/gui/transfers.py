@@ -174,16 +174,24 @@ class FilesModel(QAbstractTableModel):
         self.n = len(job.files) if job else 0
         self.endResetModel()
 
-    def tick(self):
+    def tick(self, first, last):
+        """New rows are appended (keeping scroll and selection); only the
+        visible rows first..last are refreshed, since a job can have a very
+        large number of files."""
         if not self.job:
             return
         n = len(self.job.files)
-        if n != self.n:
-            self.beginResetModel()
+        if n > self.n:
+            self.beginInsertRows(QModelIndex(), self.n, n - 1)
             self.n = n
-            self.endResetModel()
-        elif n:
-            self.dataChanged.emit(self.index(0, 2), self.index(n - 1, len(self.COLS) - 1))
+            self.endInsertRows()
+        last = min(last, self.n - 1)
+        if 0 <= first <= last:
+            self.dataChanged.emit(self.index(first, 2), self.index(last, len(self.COLS) - 1))
+
+    def row_of(self, f):
+        r = f.idx
+        return r if 0 <= r < self.n and self.job.files[r] is f else -1
 
     def file_at(self, row):
         return self.job.files[row] if self.job and 0 <= row < self.n else None
@@ -252,6 +260,7 @@ class TransfersPane(QWidget):
         super().__init__()
         self.mgr = manager
         self.items = {}
+        self._final = set()   # finished job ids whose queue row is up to date
         self.cur_job = None
         self.cur_file = None
 
@@ -434,10 +443,12 @@ class TransfersPane(QWidget):
                 st = "cancelled" if j.cancelled else "queued"
                 it.setText(1, st)
                 continue
-            s = j.snapshot() if j is not self.cur_job else None
-            if s is None:
+            if j is self.cur_job or j.id in self._final:
                 continue
+            s = j.snapshot()
             self._fill_item(it, s)
+            if s.state in (engine.J_DONE, engine.J_FAILED, engine.J_CANCELLED):
+                self._final.add(j.id)     # its row won't change again
         j = self.cur_job
         if j is None:
             return
@@ -481,7 +492,10 @@ class TransfersPane(QWidget):
         else:
             self.errors.hide()
         self._fill_workers(s)
-        self.files_model.tick()
+        vp = self.files.viewport()
+        first = self.files.rowAt(0)
+        last = self.files.rowAt(vp.height() - 1)
+        self.files_model.tick(max(0, first), last if last >= 0 else 1 << 30)
         self._fill_map(j)
 
     def _fill_item(self, it, s):
@@ -505,7 +519,8 @@ class TransfersPane(QWidget):
             it.setText(0, f"#{info.idx + 1}")
             it.setText(1, info.desc)
             if info.state == "busy" and info.block >= 0 and info.total:
-                f = self.cur_job.by_id.get(info.file_id) if self.cur_job else None
+                files = self.cur_job.files if self.cur_job else ()
+                f = files[info.file_idx] if 0 <= info.file_idx < len(files) else None
                 nb = f"/{f.nblocks}" if f else ""
                 it.setData(2, Qt.UserRole, {
                     "segs": [(min(1.0, info.moved / info.total), SEG_ACTIVE)],
@@ -531,7 +546,7 @@ class TransfersPane(QWidget):
                 f = j.files[-1] if j.state in (engine.J_DONE, engine.J_FAILED) else j.files[0]
             self.cur_file = f
             if f is not None:
-                row = j.files.index(f) if f in j.files else -1
+                row = self.files_model.row_of(f)
                 if row >= 0 and self.files.currentIndex().row() != row:
                     self.files.selectRow(row)
         if f is None:

@@ -53,3 +53,54 @@ def test_tui_copy_flow(tmp_path):
     asyncio.run(run())
     for i in range(3):
         assert (dst / f"f{i}.fits").read_bytes() == (src / f"f{i}.fits").read_bytes()
+
+
+def test_tui_files_window(monkeypatch):
+    """Big jobs show a window of rows around the active file, and browsing
+    past its edge moves the window without losing the selected file."""
+    import time
+    from textual.widgets import DataTable
+    from rcommander.endpoint import LocalEndpoint
+    monkeypatch.setattr(TransfersScreen, "FILES_WINDOW", 100)
+    j = engine.Job(LocalEndpoint(), ["/tmp"], LocalEndpoint(), "/tmp/x")
+    for i in range(5000):
+        j.files.append(engine.FileTask(f"d/{i}", ("/a", f"d/{i}"), ("/b", f"d/{i}"),
+                                       10, 0, 0o644, 4, idx=i))
+    j.t_start, j.state, j.next_idx = time.time(), engine.J_RUNNING, 3000
+    with j.lock:
+        for f in j.files[:2990]:
+            j._retire(f, engine.F_DONE)
+        for f in j.files[2990:3000]:
+            f.state = engine.F_WORKING
+            j.active.append(f)
+
+    class Q:
+        jobs = [j]
+
+        def cancel(self, job):
+            pass
+
+    async def run():
+        app = Commander("/tmp", "/tmp")
+        async with app.run_test(size=(140, 45)) as pilot:
+            scr = TransfersScreen(Q())
+            app.push_screen(scr)
+            await pilot.pause(0.3)
+            scr.tick()
+            ft = scr.query_one("#files", DataTable)
+            assert ft.row_count == 100 and scr._lo <= 2990 < scr._hi
+            ft.focus()
+            await pilot.press("down")
+            await pilot.pause()
+            assert not scr.follow
+            for _ in range(120):
+                await pilot.press("down")
+            await pilot.pause()
+            scr.tick()
+            await pilot.pause()
+            assert scr._hi > 2990 + 100                     # window moved on
+            assert scr._lo + ft.cursor_row == scr.file.idx  # cursor still on the file
+            await pilot.press("f")
+            scr.tick()
+            assert scr.follow and scr._lo <= 2990 < scr._hi
+    asyncio.run(run())
