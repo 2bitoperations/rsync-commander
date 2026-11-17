@@ -87,6 +87,9 @@ class FileModel(QAbstractTableModel):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         elif role == Qt.ForegroundRole and e["name"].startswith(".") and e["type"] != "up":
             return QColor("#888")
+        elif role == Qt.ToolTipRole and e.get("partial"):
+            return ("transfer in progress (or interrupted): renamed to "
+                    f"{e['name'][1:-len('.rcpart')]} when complete")
         elif role == Qt.ToolTipRole and c == 1 and e["type"] == "f":
             return f"{e['size']:,} bytes"
         return None

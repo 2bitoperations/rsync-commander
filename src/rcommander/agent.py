@@ -317,7 +317,9 @@ class Handler(object):
         show_hidden = req.get("show_hidden", False)
         out = []
         for name in os.listdir(path):
-            if not show_hidden and _excluded(name, DEFAULT_EXCLUDES):
+            # NAS clutter is hidden; in-progress .rcpart files are listed (the
+            # walk that plans a copy still skips them)
+            if not show_hidden and name in DEFAULT_EXCLUDES:
                 continue
             full = os.path.join(path, name)
             lst = _stat_or_none(full, follow=False)
@@ -329,6 +331,8 @@ class Handler(object):
             e = _entry(name, st)
             if _stat.S_ISLNK(lst.st_mode):
                 e["link"] = True
+            if is_partial(name):
+                e["partial"] = True
             out.append(e)
         return {"path": os.path.abspath(path), "entries": out}, b""
 
