@@ -474,7 +474,10 @@ class Handler(object):
     def op_prepare(self, req, payload):
         """Decide the basis for receiving `final`.
         Returns basis = "partial" (resume an interrupted transfer),
-        "final" (existing file to diff against) or None (fresh)."""
+        "final" (existing file to diff against) or None (fresh), and
+        `partial`, the path blocks are written to. With `inplace`, an existing
+        final with a single link is written directly (partial == final);
+        hard-linked files still get a temp file so the other links don't change."""
         final = req["final"]
         part = partial_name(final)
         parent = os.path.dirname(final)
@@ -486,8 +489,14 @@ class Handler(object):
                     "basis_mtime_ns": _mtime_ns(st), "partial": part}, b""
         st = _stat_or_none(final)
         if st is not None and _stat.S_ISREG(st.st_mode):
-            return {"basis": "final", "basis_size": st.st_size,
-                    "basis_mtime_ns": _mtime_ns(st), "partial": part}, b""
+            resp = {"basis": "final", "basis_size": st.st_size,
+                    "basis_mtime_ns": _mtime_ns(st), "partial": part}
+            if req.get("inplace"):
+                if st.st_nlink == 1:
+                    resp["partial"] = final
+                else:
+                    resp["note"] = "hard-linked (%d links): using a temp file" % st.st_nlink
+            return resp, b""
         fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         os.close(fd)
         return {"basis": None, "basis_size": 0, "partial": part}, b""

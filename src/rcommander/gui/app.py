@@ -108,6 +108,10 @@ class CopyDialog(QDialog):
             "with your forwarded agent, which root on that box could use meanwhile.\n"
             "If neither works the copy is relayed through this machine.")
         form.addRow("", self.fwd)
+        self.inplace = QCheckBox("update existing files in place (no temp copy)")
+        self.inplace.setChecked(opts.inplace)
+        self.inplace.setToolTip("Update existing files by writing changed blocks straight into them,\ninstead of into a temp copy renamed over them. Saves copying the whole\nold file first where the disk can't clone (ext4, exFAT, HFS+; APFS and\nbtrfs clone for free). Until the copy finishes the file is part old,\npart new, and programs that have it open see it change.\nNew, small and hard-linked files still use a temp file.")
+        form.addRow("", self.inplace)
         lay.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Copy")
@@ -120,7 +124,8 @@ class CopyDialog(QDialog):
                               checksum=self.checksum.isChecked(),
                               compression=self.compress.currentData(),
                               level=self.level.value(),
-                              forward_agent=self.fwd.isChecked())
+                              forward_agent=self.fwd.isChecked(),
+                              inplace=self.inplace.isChecked())
 
 
 class MainWindow(QMainWindow):
@@ -135,7 +140,8 @@ class MainWindow(QMainWindow):
             block_size=int(self.settings.value("opts/block_size", 4 << 20)),
             checksum=self.settings.value("opts/checksum", "true") in (True, "true"),
             compression=str(self.settings.value("opts/compression", "zstd")),
-            level=int(self.settings.value("opts/level", 0)))
+            level=int(self.settings.value("opts/level", 0)),
+            inplace=self.settings.value("opts/inplace", "false") in (True, "true"))
 
         self._prompts = PromptBridge(self)
         self.left = Panel("left", self.endpoint, hosts, auth=self.authenticate)
@@ -246,7 +252,7 @@ class MainWindow(QMainWindow):
         self.opts = opts
         for k, v in (("workers", opts.workers), ("block_size", opts.block_size),
                      ("checksum", opts.checksum), ("compression", opts.compression),
-                     ("level", opts.level)):
+                     ("level", opts.level), ("inplace", opts.inplace)):
             self.settings.setValue(f"opts/{k}", v)
         target = dlg.target.text().strip() or dst_dir
         dlg.deleteLater()      # don't keep one dialog per copy alive until quit

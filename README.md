@@ -186,6 +186,17 @@ For each file:
 5. **finalize**: truncate, fsync, set mtime and mode, then rename into place.
    Until this step the final file is never half-written.
 
+**In-place updates** (`--inplace`, the copy-dialog checkbox, or `inplace = true` in a
+profile; off by default): when the destination file already exists, step 3 is skipped
+and changed blocks are written straight into it; finalize truncates and sets
+metadata without a rename. This avoids copying the whole old file first on disks
+that can't clone (ext4, exFAT, HFS+). On APFS and btrfs that copy is free anyway.
+The cost: until the transfer finishes the file is part old, part new (an interrupted
+run leaves it that way until the next run repairs it), and programs with it open
+see it change. New files, small batched files, and files with more than one hard
+link (other links would change too) still go through the temp file, and a leftover
+`.rcpart` is resumed as usual.
+
 **Small files** (up to 1 MiB, or one block if that's smaller) skip the per-file steps.
 They go in batches of up to 64 files / 8 MiB:
 

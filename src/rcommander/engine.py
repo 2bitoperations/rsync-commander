@@ -80,6 +80,12 @@ class Options:
     server_side: bool = True
     direct: bool = True
     forward_agent: bool = False
+    # Update existing files by writing changed blocks straight into them,
+    # instead of into a temp copy that is renamed over them. Saves the full
+    # copy of the old file where the destination can't clone (ext4, exFAT,
+    # HFS+), but the file is half old, half new until the transfer finishes.
+    # New files, small (batched) files and hard-linked files still use a temp file.
+    inplace: bool = False
 
 
 _NOTHING = ()   # stands in for a file's work queues until it is prepared
@@ -151,6 +157,14 @@ class FileTask:
     @property
     def dst_path(self):
         return self._join(self._dst_base, self._dst_rel, self.rel)
+
+    @property
+    def inplace(self):
+        """Blocks go straight into the destination file (Options.inplace)."""
+        return self.partial is not None and self.partial == self.dst_path
+
+    def modified_in_place(self):
+        return self.inplace and (self.bytes_done > 0 or self.basis_size != self.size)
 
     def make_queues(self):
         if self.hash_results is None:
@@ -664,8 +678,10 @@ class Job:
                 f.blocks[i] = B_PENDING
                 f.pending.append(i)
                 f.bytes_needed += f.blen(i)
-            if f.basis == "final" and f.basis_size != f.size:
+            if f.basis == "final" and f.basis_size != f.size and not f.inplace:
                 f.need_clone = True
+            if resp.get("note"):
+                self.log.append(f"{f.rel}: {resp['note']}")
             f.state = F_WORKING
             self.cv.notify_all()
 
@@ -691,7 +707,7 @@ class Job:
                         f.blocks[i] = B_PENDING
                         f.pending.append(i)
                         f.bytes_needed += f.blen(i)
-                        if f.basis == "final":
+                        if f.basis == "final" and not f.inplace:
                             f.need_clone = True
             self.cv.notify_all()
 
@@ -724,7 +740,8 @@ class Job:
         with self.lock:
             w.f.inflight -= 1
             f = w.f
-            unchanged = f.basis == "final" and not f.cloned and f.bytes_done == 0
+            unchanged = (f.basis == "final" and not f.cloned and f.bytes_done == 0
+                         and not f.modified_in_place())
             self._retire(f, F_SKIPPED if unchanged else F_DONE)
 
     def failed(self, w, msg):
@@ -997,7 +1014,8 @@ class Worker:
         try:
             if w.kind == "prepare":
                 info.desc = f"prepare {f.rel}"
-                job.done_prepare(w, self._sess("dst").prepare(f.dst_path))
+                job.done_prepare(w, self._sess("dst").prepare(f.dst_path,
+                                                              inplace=job.opts.inplace))
             elif w.kind == "hash":
                 info.desc = f"hash {w.side} {f.rel} [{w.start}-{w.start + w.count - 1}]"
                 if w.side == "src":
@@ -1051,7 +1069,7 @@ class Worker:
             elif w.kind == "finalize":
                 info.desc = f"finalize {f.rel}"
                 d = self._sess("dst")
-                if f.basis == "final" and not f.cloned:
+                if f.basis == "final" and not f.cloned and not f.modified_in_place():
                     d.touch_meta(f.dst_path, f.mtime_ns)
                 else:
                     d.finalize(f.partial, f.dst_path, f.size, f.mtime_ns, f.mode)

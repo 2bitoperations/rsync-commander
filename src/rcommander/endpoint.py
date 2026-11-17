@@ -206,8 +206,11 @@ class Session:
         return self.call({"op": "push_many", "peer": peer, "files": files, "codec": codec,
                           "level": level, "touch": [list(t) for t in touch]})[0]
 
-    def prepare(self, final):
-        return self.call({"op": "prepare", "final": final})[0]
+    def prepare(self, final, inplace=False):
+        req = {"op": "prepare", "final": final}
+        if inplace:
+            req["inplace"] = True
+        return self.call(req)[0]
 
     def clone(self, src, dst):
         self.call({"op": "clone", "src": src, "dst": dst})

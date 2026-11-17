@@ -370,3 +370,77 @@ def test_copy_with_remapped_dest(tmp_path):
     assert s.state == engine.J_DONE, j.errors
     for rel in ("sub/f0", "sub/f1", "sub/f2", "big"):
         assert sha(str(dst / "Orion" / rel)) == sha(str(src / rel))
+
+
+def _mutate(path, bs, blocks, seed):
+    import random
+    r = random.Random(seed)
+    with open(path, "r+b") as fh:
+        for i in blocks:
+            fh.seek(i * bs)
+            fh.write(r.randbytes(100))
+
+
+@pytest.mark.parametrize("dst_kind", ENDPOINTS)
+@pytest.mark.parametrize("change", ["blocks", "grow", "shrink"])
+def test_inplace_updates_existing_file(tmp_path, dst_kind, change):
+    """--inplace writes changed blocks into the existing file (same inode, no
+    .rcpart, no clone); the default replaces it via a temp file (new inode)."""
+    bs = 64 * 1024
+    src = tmp_path / "src" / "d"
+    mkfile(str(src / "big.bin"), bs * 20 + 123, 1)
+    for inplace in (False, True):
+        dst = tmp_path / f"dst{int(inplace)}"
+        run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst))
+        out = dst / "d" / "big.bin"
+        if change == "blocks":
+            _mutate(str(out), bs, [2, 7, 19], 42)
+        elif change == "grow":
+            os.truncate(out, bs * 15)                 # dest shorter: tail must be sent
+        else:
+            with open(out, "ab") as fh:               # dest longer: must be truncated
+                fh.write(os.urandom(bs * 3))
+        ino = os.stat(out).st_ino
+        j, s = run_job(LocalEndpoint(), [str(src)], ep_for(dst_kind), str(dst), inplace=inplace)
+        assert s.state == engine.J_DONE, j.errors
+        assert sha(str(out)) == sha(str(src / "big.bin"))
+        assert s.files_done == 1
+        assert (os.stat(out).st_ino == ino) is inplace, f"inplace={inplace}"
+        assert not [n for n in os.listdir(out.parent) if n.endswith(".rcpart")]
+        assert os.stat(out).st_mtime_ns // 10**9 == os.stat(src / "big.bin").st_mtime_ns // 10**9
+        if inplace and change == "blocks":
+            assert s.bytes_done == 3 * bs              # only the changed blocks
+
+
+def test_inplace_keeps_hardlinks_intact(tmp_path):
+    """A hard-linked destination is updated via a temp file even with
+    --inplace, so the other link keeps the old contents."""
+    bs = 64 * 1024
+    src = tmp_path / "src" / "d"
+    mkfile(str(src / "big.bin"), bs * 10, 1)
+    dst = tmp_path / "dst"
+    run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst))
+    out = dst / "d" / "big.bin"
+    _mutate(str(out), bs, [3], 7)
+    other = tmp_path / "snapshot.bin"
+    os.link(out, other)
+    old = sha(str(other))
+    j, s = run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst), inplace=True)
+    assert s.state == engine.J_DONE, j.errors
+    assert sha(str(out)) == sha(str(src / "big.bin"))
+    assert sha(str(other)) == old                      # untouched
+    assert any("hard-linked" in n for n in j.log)
+
+
+def test_inplace_identical_file_is_skipped(tmp_path):
+    bs = 64 * 1024
+    src = tmp_path / "src" / "d"
+    mkfile(str(src / "big.bin"), bs * 10, 1)
+    dst = tmp_path / "dst"
+    run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst))
+    out = dst / "d" / "big.bin"
+    ino = os.stat(out).st_ino
+    j, s = run_job(LocalEndpoint(), [str(src)], LocalEndpoint(), str(dst), inplace=True)
+    assert s.state == engine.J_DONE, j.errors
+    assert s.files_skipped == 1 and s.bytes_done == 0
+    assert os.stat(out).st_ino == ino

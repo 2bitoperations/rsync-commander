@@ -18,6 +18,7 @@ Profile reference (see examples/observatory.toml for a full one):
     direct = true            # NAS-to-NAS: source box pushes straight to the dest
     server_side = true       # same box: copy on the box itself
     forward_agent = false    # let the source box use your ssh agent (opt-in)
+    inplace = false          # update existing files in place, no temp copy (opt-in)
 
     [[hook]]                 # shell commands, in order
     run = "dpkg-query -l > \"$RC_STAGE/reports/packages.txt\""
@@ -108,7 +109,7 @@ class Profile:
         o = dict(self.data.get("options", {}))
         o.update(self.overrides)
         known = {"workers", "block_size_mib", "checksum", "compression", "level",
-                 "direct", "server_side", "forward_agent"}
+                 "direct", "server_side", "forward_agent", "inplace"}
         unknown = set(o) - known
         if unknown:
             raise ProfileError(f"unknown option(s): {', '.join(sorted(unknown))}")
@@ -121,7 +122,8 @@ class Profile:
                               compression=comp, level=int(o.get("level", 0)),
                               direct=bool(o.get("direct", True)),
                               server_side=bool(o.get("server_side", True)),
-                              forward_agent=bool(o.get("forward_agent", False)))
+                              forward_agent=bool(o.get("forward_agent", False)),
+                              inplace=bool(o.get("inplace", False)))
 
     def dest(self):
         d = self.t(self.data["dest"])
