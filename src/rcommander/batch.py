@@ -280,6 +280,19 @@ def run(profile_path, dry_run=False, detect=False, verbose=False, interval=30, o
             except AuthError as ex:
                 _log(f"ERROR {ex}")
                 return 2
+            # Unattended: don't silently fall back to gzip when zstd was asked for.
+            if not dry_run:
+                from .helpers import install_hint, zstd_missing
+                try:
+                    missing = zstd_missing(LocalEndpoint(), dst_ep, opts)
+                except Exception as ex:   # unreachable etc.: the job itself will report it
+                    _log(f"WARNING could not check zstd support: {ex}")
+                    missing = []
+                finally:
+                    dst_ep.reset_browse()
+                if missing:
+                    _log("ERROR " + install_hint(missing))
+                    return 2
         if not detect and not dry_run:
             prof.run_hooks("before")
         sources, warns, errs = prof.resolve_sources()

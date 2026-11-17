@@ -8,6 +8,7 @@ Keys (also shown in the footer and clickable):
   F5 copy to other panel   F6 rename   F7 mkdir   F8 delete   F9 transfers   F10 quit
 """
 
+import dataclasses
 import os
 import posixpath
 import threading
@@ -187,6 +188,32 @@ class Confirm(ModalScreen):
     @on(Button.Pressed, "#no")
     def action_no(self):
         self.dismiss(False)
+
+
+class Choice(ModalScreen):
+    """Text plus a row of buttons. dismiss(button id), or None on Esc."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, text, buttons):
+        super().__init__()
+        self.text, self.buttons = text, buttons   # [(id, label, variant)]
+
+    def compose(self):
+        with Vertical(classes="dialog wide"):
+            yield Static(self.text)
+            with Horizontal(classes="buttons"):
+                for bid, label, variant in self.buttons:
+                    yield Button(label, variant=variant, id=bid)
+
+    def on_mount(self):
+        self.query_one(f"#{self.buttons[0][0]}", Button).focus()
+
+    @on(Button.Pressed)
+    def pressed(self, ev):
+        self.dismiss(ev.button.id)
+
+    def action_cancel(self):
+        self.dismiss(None)
 
 
 class AuthPrompt(ModalScreen):
@@ -764,6 +791,7 @@ class Commander(App):
         self.endpoints = {LOCAL: LocalEndpoint()}
         self.hosts = ssh_config_hosts()
         self.opts = engine.Options()
+        self._zstd_declined = set()   # hosts the user chose gzip for (this session)
         self.queue = JobQueue(lambda j: self.call_from_thread(self._job_done, j))
         self._init = [self._parse(left) if left else (LOCAL, os.getcwd()),
                       self._parse(right) if right else (LOCAL, str(os.path.expanduser("~")))]
@@ -933,14 +961,80 @@ class Commander(App):
                 return
             target, opts = res
             self.opts = opts
-            job = engine.Job(self.endpoint(src.ep_key), paths, self.endpoint(dst.ep_key),
-                             target or dst.cwd, opts)
-            job.dst_key = dst.ep_key
-            self.queue.add(job)
-            src.marked.clear()
-            src.refresh_listing()
-            self.notify(f"queued: {job.title}")
+            src_ep, dst_ep = self.endpoint(src.ep_key), self.endpoint(dst.ep_key)
+
+            def start(o):
+                job = engine.Job(src_ep, paths, dst_ep, target or dst.cwd, o)
+                job.dst_key = dst.ep_key
+                self.queue.add(job)
+                src.marked.clear()
+                src.refresh_listing()
+                self.notify(f"queued: {job.title}")
+            self._ensure_zstd(src_ep, dst_ep, opts, start)
         self.push_screen(CopyDialog(what, dst.cwd, self.opts), done)
+
+    def _ensure_zstd(self, src_ep, dst_ep, opts, start):
+        """zstd asked for but a remote end lacks it: offer to install the helper
+        there, or fall back to gzip. Then start(opts) (on the UI thread)."""
+        from .helpers import install_zstd, zstd_missing
+        if opts.compression != "zstd":
+            start(opts)
+            return
+        declined = self._zstd_declined
+        gzip = dataclasses.replace(opts, compression="gzip")
+
+        def install(eps):
+            hosts = ", ".join(e.host for e in eps)
+            self.call_from_thread(self.notify, f"installing zstd on {hosts}…")
+            try:
+                bad = [e.host for e in eps if not install_zstd(e, log=lambda m: None)]
+                err = f"zstd still not available on {', '.join(bad)}" if bad else None
+            except Exception as ex:
+                err = str(ex)
+            if err is None:
+                self.call_from_thread(self.notify, f"zstd installed on {hosts}")
+                self.call_from_thread(start, opts)
+                return
+
+            def answer(choice):
+                if choice == "gzip":
+                    start(gzip)
+            self.call_from_thread(self.push_screen, Choice(
+                f"Installing zstd on {hosts} failed:\n{err}\n\n"
+                "Send this transfer with gzip (zlib) instead?",
+                [("gzip", "Use gzip (zlib)", "primary"), ("cancel", "Cancel", "default")]),
+                answer)
+
+        def ask(missing):
+            hosts = ", ".join(e.host for e in missing)
+
+            def answer(choice):
+                if choice == "gzip":
+                    declined.update(e.host for e in missing)
+                    start(gzip)
+                elif choice == "install":
+                    threading.Thread(target=install, args=(missing,), daemon=True).start()
+            self.push_screen(Choice(
+                f"zstd compression was requested, but {hosts} can't do zstd.\n\n"
+                "rsync-commander can install it: it downloads the Python `zstandard` package "
+                f"here and unpacks it into ~/.rcommander/lib on {hosts} (no root, no pip; "
+                "remove with rm -rf ~/.rcommander). Or send this transfer with gzip (zlib).",
+                [("install", "Install zstd", "primary"),
+                 ("gzip", "Fall back to gzip (zlib)", "warning"),
+                 ("cancel", "Cancel", "default")]), answer)
+
+        def check():
+            try:
+                missing = zstd_missing(src_ep, dst_ep, opts)
+            except Exception:          # can't check: the job will report the problem
+                missing = []
+            if not missing:
+                self.call_from_thread(start, opts)
+            elif all(e.host in declined for e in missing):   # already chose gzip
+                self.call_from_thread(start, gzip)
+            else:
+                self.call_from_thread(ask, [e for e in missing if e.host not in declined])
+        threading.Thread(target=check, daemon=True).start()
 
     def action_transfers(self):
         if isinstance(self.screen, TransfersScreen):

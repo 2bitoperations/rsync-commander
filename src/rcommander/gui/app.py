@@ -1,5 +1,6 @@
 """Main window: two panels on top, transfers below, NC-style function keys."""
 
+import dataclasses
 import os
 import posixpath
 import sys
@@ -9,7 +10,8 @@ from PySide6.QtCore import QLoggingCategory, QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+                               QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressDialog,
+                               QPushButton,
                                QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
 from .. import engine
@@ -144,6 +146,7 @@ class MainWindow(QMainWindow):
             inplace=self.settings.value("opts/inplace", "false") in (True, "true"))
 
         self._prompts = PromptBridge(self)
+        self._zstd_declined = set()   # hosts the user chose gzip for (this session)
         self.left = Panel("left", self.endpoint, hosts, auth=self.authenticate)
         self.right = Panel("right", self.endpoint, hosts, auth=self.authenticate)
         self.active = self.left
@@ -256,10 +259,83 @@ class MainWindow(QMainWindow):
             self.settings.setValue(f"opts/{k}", v)
         target = dlg.target.text().strip() or dst_dir
         dlg.deleteLater()      # don't keep one dialog per copy alive until quit
-        job = engine.Job(self.endpoint(src_key), paths, self.endpoint(dst_panel.ep_key),
-                         target, opts)
-        job.dst_key = dst_panel.ep_key
-        self.mgr.add(job)
+        src_ep, dst_ep = self.endpoint(src_key), self.endpoint(dst_panel.ep_key)
+
+        def start(o):
+            job = engine.Job(src_ep, paths, dst_ep, target, o)
+            job.dst_key = dst_panel.ep_key
+            self.mgr.add(job)
+        self._ensure_zstd(src_ep, dst_ep, opts, start)
+
+    # -- zstd on the remote ends ----------------------------------------------
+    def _ensure_zstd(self, src_ep, dst_ep, opts, start):
+        """zstd asked for but a remote end lacks it: offer to install the helper
+        there, or fall back to gzip. Then start(opts)."""
+        from ..helpers import zstd_missing
+        if opts.compression != "zstd":
+            start(opts)
+            return
+
+        def checked(missing, ex):
+            if ex or not missing:     # can't check (the job will report it) / all fine
+                start(opts)
+                return
+            gzip = dataclasses.replace(opts, compression="gzip")
+            missing = [e for e in missing if e.host not in self._zstd_declined]
+            if not missing:           # already chose gzip for these hosts
+                start(gzip)
+                return
+            hosts = ", ".join(e.host for e in missing)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("zstd not available")
+            box.setText(f"zstd compression was requested, but {hosts} can't do zstd.")
+            box.setInformativeText(
+                "rsync-commander can install it: it downloads the Python `zstandard` "
+                f"package here and unpacks it into ~/.rcommander/lib on {hosts} "
+                "(no root, no pip; remove with rm -rf ~/.rcommander).\n\n"
+                "Or send this transfer with gzip (zlib) instead.")
+            inst = box.addButton("Install zstd", QMessageBox.AcceptRole)
+            fall = box.addButton("Fall back to gzip (zlib)", QMessageBox.DestructiveRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(inst)
+            box.exec()
+            clicked = box.clickedButton()
+            box.deleteLater()
+            if clicked is fall:
+                self._zstd_declined.update(e.host for e in missing)
+                start(gzip)
+            elif clicked is inst:
+                self._install_zstd(missing, lambda: start(opts), lambda: start(gzip))
+        run_async(lambda: zstd_missing(src_ep, dst_ep, opts), checked)
+
+    def _install_zstd(self, eps, on_ok, on_fallback):
+        from ..helpers import install_zstd
+        hosts = ", ".join(e.host for e in eps)
+        prog = QProgressDialog(f"Installing zstd on {hosts}…", None, 0, 0, self)
+        prog.setWindowTitle("rsync-commander")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.show()
+
+        def work():
+            bad = [e.host for e in eps if not install_zstd(e, log=lambda m: None)]
+            if bad:
+                raise RuntimeError(f"zstd still not available on {', '.join(bad)}")
+
+        def done(_r, ex):
+            prog.close()
+            prog.deleteLater()
+            if ex is None:
+                on_ok()
+                return
+            r = QMessageBox.warning(
+                self, "zstd install failed", f"Installing zstd on {hosts} failed:\n{ex}\n\n"
+                "Send this transfer with gzip (zlib) instead?",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
+            if r == QMessageBox.Yes:
+                on_fallback()
+        run_async(work, done)
 
     def _job_done(self, job):
         for p in (self.left, self.right):

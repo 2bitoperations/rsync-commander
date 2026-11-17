@@ -110,10 +110,18 @@ ratio at about 40× the speed. The sender does the compressing: the NAS's CPU fo
 pulls, this machine for pushes. Above level ~9 a 2-core NAS becomes the bottleneck.
 
 The agent finds zstd in Python 3.14's `compression.zstd`, in the `zstandard`
-package, or in a `zstd` binary on PATH. If either end lacks it, the job falls back
-to gzip and says so in Notes. `install-zstd HOST` puts a matching
+package, or in a `zstd` binary on PATH. `install-zstd HOST` puts a matching
 `zstandard` wheel in `HOST:~/.rcommander/lib`. It is downloaded here, since NAS boxes have no pip.
 Remove it with `rm -rf ~/.rcommander`.
+
+When zstd is selected but a remote end lacks it:
+
+- **GUI / TUI**: starting the transfer asks *Install zstd* (runs the above, then
+  starts with zstd), *Fall back to gzip (zlib)* (remembered for that host until
+  you quit), or *Cancel*.
+- **`batch`**: exits with status 2 before running any hooks and prints the
+  `install-zstd` command. Install it, or set `compression = "gzip"`.
+- **`copy`**: falls back to gzip and says so in Notes.
 
 ## Terminal UI
 

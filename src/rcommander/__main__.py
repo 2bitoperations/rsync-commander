@@ -197,7 +197,10 @@ def main(argv=None):
         return
     if a.cmd == "install-zstd":
         from .helpers import install_zstd
-        sys.exit(0 if install_zstd(a.host) else 1)
+        try:
+            sys.exit(0 if install_zstd(a.host) else 1)
+        except Exception as ex:
+            sys.exit(f"install-zstd failed: {ex}")
     try:
         from .gui.app import run
     except ImportError as ex:

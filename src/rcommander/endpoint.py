@@ -439,6 +439,13 @@ class RemoteEndpoint(Endpoint):
                 self._browse = SshSession(self)
             return self._browse
 
+    def reset_browse(self):
+        """Drop the browse session; the next browse() starts a fresh agent."""
+        with self._browse_lock:
+            if self._browse:
+                self._browse.close()
+                self._browse = None
+
     def browse_call(self, fn):
         """Run fn(session) on the browse session, reconnecting once if it died."""
         try:
